@@ -1,6 +1,9 @@
 """
-慢病毒包装与细胞系构建评估系统
+慢病毒包装-细胞系评估系统
+
 部署版本 - Streamlit Cloud
+
+已更新：新增细胞培养难点清单式评估功能
 """
 
 import streamlit as st
@@ -28,7 +31,7 @@ logger = logging.getLogger("lentivirus_assessment")
 
 # ==================== 页面配置 ====================
 st.set_page_config(
-    page_title="慢病毒包装与细胞系构建评估系统",
+    page_title="慢病毒包装-细胞系评估系统",
     page_icon="🧬",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -36,20 +39,69 @@ st.set_page_config(
 
 # ==================== AI分析客户端 ====================
 class AIAnalysisClient:
-    """通义千问API客户端 - 用于文献语义分析和序列设计"""
+    """通用千问API客户端 - 用于文献语义分析和序列设计"""
     
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key
         self.base_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     
+    # 新增：细胞培养难点检查清单（用于Prompt构建）
+    CELL_CULTURE_DIFFICULTY_CHECKLIST = {
+        "培养基特殊要求": [
+            "无血清培养基（如UltraCULTURE、SFM）",
+            "需要添加特殊血清（如马血清、新生牛血清）",
+            "需要添加生长因子（如EGF、bFGF、HGF、VEGF等）",
+            "需要添加激素（如胰岛素、氢化可的松、地塞米松）",
+            "需要添加微量元素（如硒酸钠、转铁蛋白）",
+            "培养基价格>200元/500ml（如StemPro、mTeSR）",
+            "需要定制化培养基（如添加特定脂肪酸、胆固醇）",
+            "需要条件培养基（收集其他细胞上清）"
+        ],
+        "基质/包被要求": [
+            "需要Matrigel包被（价格昂贵，4°C操作）",
+            "需要胶原蛋白包被（I型/IV型）",
+            "需要纤连蛋白（Fibronectin）包被",
+            "需要明胶包被（0.1% Gelatin）",
+            "需要多聚赖氨酸（Poly-L-lysine）包被",
+            "需要饲养层细胞（Feeder layer，如MEF、STO）",
+            "需要低吸附培养板（Ultra-Low Attachment）",
+            "需要专用培养装置（如Spinner flask、旋转瓶）"
+        ],
+        "气体/环境敏感": [
+            "需要低氧培养（5%或更低O₂，非常规CO₂培养箱）",
+            "对pH极度敏感（需每日观察颜色变化）",
+            "需要持续震荡/搅拌（静态培养会死亡）",
+            "对CO₂浓度敏感（需精确控制5-10%）",
+            "对温度波动敏感（不能长时间开门）"
+        ],
+        "操作复杂度": [
+            "密度极度敏感（太稀死，太密也死，窗口窄）",
+            "对机械力敏感（吹打、离心即死）",
+            "需要每天换液/传代（周末无法休息）",
+            "需要半量换液（不能全换，否则死亡）",
+            "需要频繁观察/拍照（每日至少2次）",
+            "胰酶消化时间窗口窄（<2分钟或>10分钟）",
+            "容易成团成球（需频繁吹打分散）",
+            "容易自发分化（需持续加因子维持）"
+        ],
+        "时间/成本": [
+            "倍增时间>48小时（生长极其缓慢）",
+            "倍增时间<12小时（需每天传代，累死人）",
+            "原代细胞（无法扩增，需反复取材）",
+            "有限细胞系（传代次数受限，如<10代）",
+            "需要特定批次血清（不同批次差异大）",
+            "支原体敏感（一旦污染立即死亡，且形态无明显变化）"
+        ]
+    }
+
     def analyze_antiviral_evidence(self, gene_name: str, title: str, abstract: str) -> Dict:
         """
         使用AI分析文献是否包含抗病毒功能证据
         返回: {
             'is_antiviral': bool,
-            'confidence': float,  # 0-1
-            'mechanism': str,     # 机制描述
-            'reasoning': str      # 推理过程
+            'confidence': float, # 0-1
+            'mechanism': str, # 机制描述
+            'reasoning': str # 推理过程
         }
         """
         if not self.api_key:
@@ -57,7 +109,7 @@ class AIAnalysisClient:
         
         try:
             prompt = f"""请分析以下文献，判断其是否报道了基因"{gene_name}"具有抗病毒功能。
-            
+
 文献标题：{title}
 文献摘要：{abstract}
 
@@ -65,7 +117,7 @@ class AIAnalysisClient:
 {{
     "is_antiviral": true/false,
     "confidence": 0.0-1.0,
-    "mechanism": "具体的抗病毒机制，如：调控IFITM家族、影响鞘脂代谢、激活干扰素通路等",
+    "mechanism": "具体的抗病毒机制，如：调控IFITM家族、影响脂质代谢、激活干扰素通路等",
     "reasoning": "简要说明判断依据"
 }}
 
@@ -73,12 +125,11 @@ class AIAnalysisClient:
 1. is_antiviral：只要文献提到该基因能抑制病毒复制、增强抗病毒免疫、调控抗病毒基因表达等，即为true
 2. confidence：证据越明确、机制越清晰，置信度越高
 3. 即使不是经典的ISG基因，只要提到能影响病毒感染或复制，也算有抗病毒功能"""
-
+            
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
-            
             payload = {
                 'model': 'qwen-turbo',
                 'input': {
@@ -101,16 +152,14 @@ class AIAnalysisClient:
                 timeout=30
             )
             response.raise_for_status()
-            
             result = response.json()
             content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
             
             # 解析JSON响应
             try:
-                # 清理可能的Markdown代码块标记
+                # 清理可能的Markdown代码标记
                 content_clean = content.replace('```json', '').replace('```', '').strip()
                 analysis = json.loads(content_clean)
-                
                 return {
                     'is_antiviral': analysis.get('is_antiviral', False),
                     'confidence': float(analysis.get('confidence', 0)),
@@ -121,7 +170,7 @@ class AIAnalysisClient:
                 logger.warning(f"AI返回非JSON格式: {content}")
                 # 简单关键词回退
                 is_antiviral = any(kw in (title + abstract).lower() for kw in 
-                                  ['antiviral', 'virus', 'interferon', 'ifitm', 'innate immunity'])
+                    ['antiviral', 'virus', 'interferon', 'ifitm', 'innate immunity'])
                 return {
                     'is_antiviral': is_antiviral,
                     'confidence': 0.5 if is_antiviral else 0,
@@ -137,36 +186,18 @@ class AIAnalysisClient:
                 'mechanism': '',
                 'reasoning': f'API调用失败: {str(e)}'
             }
-    
-    def analyze_gene_function_comprehensive(self, gene_name: str, gene_description: str, 
-                                           papers_oe: List[Dict], papers_kd: List[Dict], 
-                                           papers_ko: List[Dict], papers_general: List[Dict]) -> Dict:
+
+    def analyze_gene_function_comprehensive(self, gene_name: str, gene_description: str,
+                                          papers_oe: List[Dict], papers_kd: List[Dict],
+                                          papers_ko: List[Dict], papers_general: List[Dict]) -> Dict:
         """
         综合分析基因功能及不同实验模型的表型
-        
         返回: {
-            'protein_function': {
-                'category': '蛋白类别（转录因子/酶/受体等）',
-                'domains': '结构域',
-                'pathways': '涉及的信号通路',
-                'cellular_location': '亚细胞定位'
-            },
-            'overexpression': {
-                'cell_models': [{'cell_line': '细胞系', 'phenotype': '表型', 'reference': '文献'}],
-                'animal_models': [{'model': '动物模型', 'phenotype': '表型', 'reference': '文献'}],
-                'summary': '过表达效应总结'
-            },
-            'knockdown': {
-                'cell_models': [...],
-                'summary': '敲低效应总结'
-            },
-            'knockout': {
-                'cell_models': [...],
-                'animal_models': [...],
-                'summary': '敲除效应总结'
-            },
-            'disease_relevance': '疾病相关性',
-            'key_references': ['关键文献列表']
+            'protein_function': {...},
+            'overexpression': {...},
+            'knockdown': {...},
+            'knockout': {...},
+            ...
         }
         """
         if not self.api_key:
@@ -267,13 +298,12 @@ class AIAnalysisClient:
 2. 区分细胞水平和动物水平的数据
 3. 重点关注与慢病毒包装相关的因素（如：是否影响细胞活力、是否调控病毒相关通路）
 4. 文献格式要规范，包含PMID"""
-
+        
         try:
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
-            
             payload = {
                 'model': 'qwen-turbo',
                 'input': {
@@ -296,7 +326,6 @@ class AIAnalysisClient:
                 timeout=60
             )
             response.raise_for_status()
-            
             result = response.json()
             content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
             
@@ -315,33 +344,11 @@ class AIAnalysisClient:
         except Exception as e:
             logger.error(f"AI功能分析失败: {e}")
             return {'error': str(e)}
-    
-    def design_rnai_sequences(self, gene_name: str, gene_id: str = "", gene_description: str = "") -> Dict:
+
+    def design_rnai_sequences(self, gene_name: str, gene_id: str = "", 
+                             gene_description: str = "") -> Dict:
         """
         使用AI设计siRNA/shRNA序列，并返回推荐序列及来源文献/专利
-        
-        返回: {
-            'sequences': [
-                {
-                    'target_seq': '正义链序列(19-21nt)',
-                    'design_rationale': '设计原理（靶向区域、GC含量等）',
-                    'efficiency_score': '预期效率评分',
-                    'references': [
-                        {
-                            'type': '文献/专利',
-                            'title': '标题',
-                            'authors': '作者/发明人',
-                            'year': '年份',
-                            'source': '期刊/专利号',
-                            'pmid_or_patent': 'PMID或专利号',
-                            'url': '链接'
-                        }
-                    ]
-                }
-            ],
-            'notes': '设计注意事项',
-            'validation_method': '推荐的验证方法'
-        }
         """
         if not self.api_key:
             return {'error': '未配置AI API', 'sequences': []}
@@ -351,7 +358,7 @@ class AIAnalysisClient:
 
 请基于最新的文献和公开数据库知识，提供：
 1. 3条高质量的siRNA靶序列（19-21nt，不包含悬垂端）
-2. 每条序列的设计依据（靶向哪个外显子、GC含量、特异性考虑）
+2. 每条序列的设计依据（靶向哪个外显子、GC含量等）
 3. 支持这些设计的参考文献或专利（真实存在的文献，优先选择高被引文献或经典方法论文）
 
 请按以下JSON格式回答（只返回JSON）：
@@ -387,15 +394,14 @@ class AIAnalysisClient:
 
 要求：
 1. 序列必须是真实的、经过验证的设计原则
-2. 参考文献必须是真实存在的经典文献（2000-2024年间）
-3. 如果基因有已发表的有效siRNA序列（如来自Dharmacon、Sigma等数据库的验证序列），请优先列出
+2. 参考文献必须是真实存在的（2000-2024年间）
+3. 如该基因有已发表的有效siRNA序列（如来自Dharmacon、Sigma等数据库的验证序列），请优先列出
 4. 提供具体的载体构建建议"""
-
+            
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
-            
             payload = {
                 'model': 'qwen-turbo',
                 'input': {
@@ -418,7 +424,6 @@ class AIAnalysisClient:
                 timeout=60
             )
             response.raise_for_status()
-            
             result = response.json()
             content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
             
@@ -438,26 +443,11 @@ class AIAnalysisClient:
         except Exception as e:
             logger.error(f"AI序列设计失败: {e}")
             return {'error': str(e), 'sequences': []}
-    
-    def design_crispr_sequences(self, gene_name: str, gene_id: str = "", gene_description: str = "") -> Dict:
+
+    def design_crispr_sequences(self, gene_name: str, gene_id: str = "", 
+                               gene_description: str = "") -> Dict:
         """
-        使用AI设计CRISPR/sgRNA序列，并返回推荐序列及来源文献/专利
-        
-        返回: {
-            'sgrnas': [
-                {
-                    'sequence': '20nt靶序列（不含NGG）',
-                    'pam': 'NGG',
-                    'target_exon': '靶向外显子',
-                    'design_tool': '设计工具（如Benchling、CRISPOR等）',
-                    'efficiency_score': '效率评分',
-                    'off_target_risk': '脱靶风险',
-                    'references': [...]
-                }
-            ],
-            'delivery_notes': '慢病毒载体递送建议',
-            'validation_method': '验证方法'
-        }
+        使用AI设计CRISPR/sgRNA序列
         """
         if not self.api_key:
             return {'error': '未配置AI API', 'sgrnas': []}
@@ -507,15 +497,14 @@ class AIAnalysisClient:
 
 要求：
 1. 序列必须符合SpCas9的NGG PAM要求
-2. 优先选择靶向编码区外显子（特别是早期外显子或功能结构域）的序列
+2. 优先选择编码区外显子（特别是早期外显子或功能结构域）的序列
 3. 参考文献必须是真实存在的（如Doench 2016、Sanjana 2014等CRISPR经典文献）
 4. 提供具体的慢病毒载体构建建议"""
-
+            
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
-            
             payload = {
                 'model': 'qwen-turbo',
                 'input': {
@@ -538,9 +527,8 @@ class AIAnalysisClient:
                 timeout=60
             )
             response.raise_for_status()
-            
             result = response.json()
-            content = result.get('output', {}).get('choices', [{}])[0].get('message', '').get('content', '')
+            content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
             
             try:
                 content_clean = content.replace('```json', '').replace('```', '').strip()
@@ -557,6 +545,192 @@ class AIAnalysisClient:
         except Exception as e:
             logger.error(f"AI CRISPR设计失败: {e}")
             return {'error': str(e), 'sgrnas': []}
+
+    # ==================== 新增：细胞培养难点分析 ====================
+    def analyze_cell_culture_difficulty(self, cell_line: str, papers: List[Dict]) -> Dict:
+        """
+        分析细胞培养的具体难点，返回清单式结果（非评分制）
+        返回: {
+            'culture_medium': ['具体难点描述', ...],
+            'coating_matrix': ['具体难点描述', ...],
+            'environment': ['具体难点描述', ...],
+            'operation': ['具体难点描述', ...],
+            'time_cost': ['具体难点描述', ...],
+            'special_warnings': ['关键警告', ...],
+            'protocol_tips': ['实用建议', ...],
+            'verified_by': ['支持文献']
+        }
+        """
+        if not self.api_key:
+            return {'error': '未配置AI API'}
+        
+        # 构建文献文本
+        literature_text = "\n".join([
+            f"文献{i+1}: {p.get('title', '')}\n摘要: {p.get('abstract', '')[:400]}..."
+            for i, p in enumerate(papers[:5])
+        ])
+        
+        # 构建检查清单文本供AI参考
+        checklist_text = ""
+        for category, items in self.CELL_CULTURE_DIFFICULTY_CHECKLIST.items():
+            checklist_text += f"\n{category}:\n" + "\n".join([f"- {item}" for item in items])
+        
+        prompt = f"""作为细胞培养专家，请基于以下关于细胞系"{cell_line}"的文献，分析其培养的具体难点。
+
+{literature_text}
+
+参考以下检查清单类别（但不要被其限制，请基于文献提取具体难点）：
+{checklist_text}
+
+请按以下JSON格式返回该细胞的所有已知培养难点（只返回JSON）：
+{{
+    "culture_medium": [
+        "具体难点描述（如：必须使用无血清mTeSR培养基，价格昂贵）"
+    ],
+    "coating_matrix": [
+        "具体难点描述（如：必须预包被Matrigel，4°C过夜，操作繁琐）"
+    ],
+    "environment": [
+        "具体难点描述（如：需要5%低氧培养箱，普通CO₂培养箱不适用）"
+    ],
+    "operation": [
+        "具体难点描述（如：对胰酶极度敏感，消化超过3分钟即死亡）"
+    ],
+    "time_cost": [
+        "具体难点描述（如：倍增时间72小时，实验周期极长）"
+    ],
+    "special_warnings": [
+        "关键警告（如：该细胞极易支原体污染，且污染后形态无明显变化）"
+    ],
+    "protocol_tips": [
+        "实用建议（如：建议半量换液，传代比例1:2，周末不休息）"
+    ],
+    "verified_by": [
+        "支持文献（格式：作者 et al., 年份, 期刊, PMID）"
+    ]
+}}
+
+要求：
+1. 只列出该细胞确实存在的难点，没有就留空数组
+2. 描述要具体（包含试剂名称、时间参数、浓度等）
+3. 如有多种培养方法（如包被vs不包被），都列出并注明差异
+4. 必须注明这些信息是基于文献还是ATCC等数据库"""
+        
+        try:
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+            payload = {
+                'model': 'qwen-turbo',
+                'input': {
+                    'messages': [
+                        {'role': 'system', 'content': '你是细胞培养技术专家，熟悉各种细胞系的培养难点和protocol。'},
+                        {'role': 'user', 'content': prompt}
+                    ]
+                },
+                'parameters': {
+                    'result_format': 'message',
+                    'max_tokens': 2000,
+                    'temperature': 0.2
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
+            response.raise_for_status()
+            result = response.json()
+            content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
+            
+            try:
+                content_clean = content.replace('```json', '').replace('```', '').strip()
+                analysis = json.loads(content_clean)
+                return analysis
+            except json.JSONDecodeError:
+                logger.error(f"AI细胞培养难点分析返回非JSON格式: {content}")
+                return {'error': '格式解析失败', 'raw': content[:500]}
+                
+        except Exception as e:
+            logger.error(f"AI细胞培养难点分析失败: {e}")
+            return {'error': str(e)}
+
+    # ==================== 新增：慢病毒易感性分析 ====================
+    def analyze_lentivirus_susceptibility(self, cell_line: str, papers: List[Dict]) -> Dict:
+        """
+        分析慢病毒易感性，返回具体参数和建议（清单式）
+        """
+        if not self.api_key:
+            return {'error': '未配置AI API'}
+        
+        literature_text = "\n".join([
+            f"文献{i+1}: {p.get('title', '')}\n摘要: {p.get('abstract', '')[:400]}..."
+            for i, p in enumerate(papers[:5])
+        ])
+        
+        prompt = f"""分析细胞系"{cell_line}"的慢病毒/逆转录病毒易感性。
+
+基于文献，请提供以下具体信息（JSON格式）：
+{{
+    "susceptibility_level": "High/Medium/Low/Unknown",
+    "recommended_moi": "推荐MOI范围（如：1-5，或>10）",
+    "infection_efficiency": "典型感染效率（如：>80%，或<30%）",
+    "requires_polybrene": "是否需要Polybrene（是/否/强烈建议）",
+    "requires_spinfection": "是否需要离心感染（spinoculation）",
+    "requires_pseudotyping": "是否需要特殊包膜蛋白（如VSV-G）",
+    "challenges": [
+        "具体难点（如：该细胞极难感染，即使MOI=50效率仍<20%）"
+    ],
+    "optimization_tips": [
+        "优化建议（如：建议用lentiCRISPRv2而pLKO.1，滴度更高）"
+    ],
+    "reported_cell_lines": [
+        "文献中报道过的类似细胞（如：A549类似肺癌细胞系）"
+    ],
+    "references": ["支持文献"]
+}}"""
+        
+        try:
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+            payload = {
+                'model': 'qwen-turbo',
+                'input': {
+                    'messages': [
+                        {'role': 'system', 'content': '你是病毒学专家，精通慢病毒载体和细胞转导。'},
+                        {'role': 'user', 'content': prompt + "\n\n文献:\n" + literature_text}
+                    ]
+                },
+                'parameters': {
+                    'result_format': 'message',
+                    'max_tokens': 1500,
+                    'temperature': 0.2
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
+            response.raise_for_status()
+            result = response.json()
+            content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
+            
+            try:
+                content_clean = content.replace('```json', '').replace('```', '').strip()
+                return json.loads(content_clean)
+            except json.JSONDecodeError:
+                return {'error': '格式解析失败', 'raw': content[:500]}
+                
+        except Exception as e:
+            return {'error': str(e)}
 
 # ==================== 核心数据库（第一层） ====================
 class CoreDatabases:
@@ -588,7 +762,7 @@ class CoreDatabases:
     CORE_TOXIC = {
         'BAX': ('PMID:10625696', '促凋亡Bcl-2家族', '过表达直接激活线粒体凋亡途径'),
         'BAK1': ('PMID:10625696', '促凋亡Bcl-2家族', '线粒体外膜通透化诱导凋亡'),
-        'BID': ('PMID:10625696', '促凋亡BH3-only蛋白', '连接死亡受体与线粒体凋亡'),
+        'BID': ('PMID:10625696', '促凋亡BH3-only蛋白', '连接死亡受体到线粒体凋亡'),
         'PUMA': ('PMID:12968034', 'p53下游促凋亡', '强力促凋亡BH3-only蛋白'),
         'NOXA': ('PMID:12968034', 'p53下游促凋亡', '促凋亡BH3-only蛋白'),
         'CASP3': ('PMID:9228057', '凋亡执行caspase', '过表达直接激活凋亡级联反应'),
@@ -596,10 +770,10 @@ class CoreDatabases:
         'CASP8': ('PMID:9228057', '凋亡启动caspase', '死亡受体通路启动分子'),
         'CASP9': ('PMID:9228057', '凋亡启动caspase', '线粒体通路启动分子'),
         'FAS': ('PMID:8666142', '死亡受体', '激活外源性凋亡途径'),
-        'TNF': ('PMID:15157675', '促炎细胞因子', '诱导细胞坏死性凋亡'),
+        'TNF': ('PMID:15157675', '促炎细胞因子', '诱导细胞毒性凋亡'),
         'TRAIL': ('PMID:10578115', 'TNF家族凋亡诱导配体', '选择性诱导肿瘤细胞凋亡'),
-        'TP53': ('PMID:20154749', '肿瘤抑制因子', '过表达诱导G1阻滞和凋亡'),
-        'CDKN1A': ('PMID:8242752', '细胞周期抑制因子', 'p21强抑制剂导致细胞周期停滞'),
+        'TP53': ('PMID:20154749', '肿瘤抑制基因', '过表达诱导G1阻滞和凋亡'),
+        'CDKN1A': ('PMID:8242752', '细胞周期抑制基因', 'p21强抑制剂导致细胞周期停滞'),
         'PARP1': ('PMID:16794554', 'DNA修复酶', '过度激活导致NAD+耗竭和细胞死亡'),
     }
     
@@ -616,10 +790,10 @@ class CoreDatabases:
         'IFIT2': ('PMID:21694717', 'ISG-干扰素诱导蛋白', '抑制病毒蛋白合成'),
         'IFIH1': ('PMID:21694717', 'ISG-MDA5', '识别病毒dsRNA激活免疫反应'),
         'DDX58': ('PMID:21694717', 'ISG-RIG-I', '识别病毒RNA诱导I型干扰素'),
-        'TRIM5': ('PMID:15890885', '限制因子', '限制HIV-1等逆转录病毒复制'),
+        'TRIM5': ('PMID:15890885', '限制因子', '抑制HIV-1等逆转录病毒复制'),
         'APOBEC3G': ('PMID:12134021', '限制因子', '胞嘧啶脱氨酶抑制HIV-1（Vif靶向）'),
-        'BST2': ('PMID:19543227', '限制因子', 'Tetherin限制病毒出芽'),
-        'KLF5': ('PMID:33597534', '转录因子-间接抗病毒', '调控IFITM家族和鞘脂代谢抑制SARS-CoV-2等病毒复制'),
+        'BST2': ('PMID:19543227', '限制因子', 'Tetherin抑制病毒出芽'),
+        'KLF5': ('PMID:33597534', '转录因子-间接抗病毒', '调控IFITM家族和脂质代谢抑制SARS-CoV-2等病毒复制'),
     }
     
     @classmethod
@@ -672,7 +846,7 @@ class AuthManager:
                 del st.session_state["password"]
             else:
                 st.session_state["password_correct"] = False
-
+        
         if "password_correct" not in st.session_state:
             st.text_input("请输入访问密码", type="password", on_change=password_entered, key="password")
             st.info("🔒 请输入密码以访问系统")
@@ -687,6 +861,7 @@ class AuthManager:
 # ==================== HPA数据管理 ====================
 class HPADataManager:
     """Human Protein Atlas数据管理 - 本地文件+SQLite缓存"""
+    
     HPA_URL = "https://www.proteinatlas.org/download/proteinatlas.tsv.zip"
     LOCAL_DIR = "hpa_data"
     DB_FILE = "hpa_cache.db"
@@ -755,11 +930,14 @@ class HPADataManager:
             zip_path = os.path.join(self.local_dir, "proteinatlas.tsv.zip")
             response = requests.get(self.HPA_URL, stream=True, timeout=300)
             response.raise_for_status()
+            
             with open(zip_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
+            
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(self.local_dir)
+            
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
@@ -868,6 +1046,7 @@ class APIConfig:
         """获取NCBI凭证 - 优先使用用户输入，其次使用Secrets"""
         user_email = st.session_state.get('ncbi_email_input', '').strip()
         user_key = st.session_state.get('ncbi_key_input', '').strip()
+        
         secret_email = st.secrets.get("NCBI_EMAIL", "")
         secret_key = st.secrets.get("NCBI_API_KEY", "")
         
@@ -945,7 +1124,6 @@ class NCBIClient:
         gene_id = gene_ids[0]
         summary_params = {'db': 'gene', 'id': gene_id, 'retmode': 'json'}
         result = _self._make_request('esummary.fcgi', summary_params)
-        
         if not result:
             return {}, {}
         
@@ -957,6 +1135,7 @@ class NCBIClient:
             'organism': organism,
             'summary': summary.get('summary', '')
         }
+        
         transcripts = _self._fetch_transcripts(gene_id)
         return gene_info, transcripts
     
@@ -1044,7 +1223,6 @@ class NCBIClient:
                 
                 pmids = result.get('esearchresult', {}).get('idlist', [])
                 new_pmids = [p for p in pmids if p not in seen_pmids]
-                
                 if not new_pmids:
                     continue
                 
@@ -1098,21 +1276,18 @@ class NCBIClient:
             'antiviral': [
                 # 层级1：经典ISG/干扰素通路（原有）
                 f"{gene_name} interferon antiviral innate immunity",
-                f"{gene_name} virus replication restriction factor", 
+                f"{gene_name} virus replication restriction factor",
                 f"{gene_name} ISG interferon stimulated",
-                
                 # 层级2：间接抗病毒机制（转录因子、宿主因子）
                 f"{gene_name} IFITM antiviral",  # KLF5调控IFITM家族
                 f"{gene_name} transcription factor antiviral gene",
                 f"{gene_name} regulates interferon stimulated gene",
                 f"{gene_name} host factor virus infection",
-                
                 # 层级3：具体通路和病毒（扩大覆盖）
                 f"{gene_name} STING MDA5 RIG-I pathway",
                 f"{gene_name} influenza HIV SARS-CoV-2",
                 f"{gene_name} virus susceptibility resistance",
                 f"{gene_name} viral infection immune response",
-                
                 # 层级4：广义抗病毒相关（兜底）
                 f"{gene_name} antiviral defense mechanism",
                 f"{gene_name} innate immunity virus",
@@ -1140,7 +1315,6 @@ class NCBIClient:
                 
                 pmids = result.get('esearchresult', {}).get('idlist', [])
                 new_pmids = [p for p in pmids if p not in seen_pmids]
-                
                 if not new_pmids:
                     continue
                 
@@ -1253,6 +1427,64 @@ class NCBIClient:
         except Exception as e:
             logger.error(f"Same cell/gene search error: {e}")
             return []
+    
+    # 新增：检索细胞培养相关文献（用于培养难点分析）
+    def search_cell_culture_literature(self, cell_name: str) -> List[Dict]:
+        """检索细胞培养条件的文献"""
+        try:
+            queries = [
+                f"{cell_name} cell culture protocol",
+                f"{cell_name} culture medium serum",
+                f"{cell_name} matrigel coating",
+                f"{cell_name} feeder layer",
+                f"{cell_name} culture difficulty"
+            ]
+            all_papers = []
+            seen_pmids = set()
+            
+            for query in queries:
+                search_params = {
+                    'db': 'pubmed',
+                    'term': query,
+                    'retmode': 'json',
+                    'retmax': 3,
+                    'sort': 'relevance'
+                }
+                result = self._make_request('esearch.fcgi', search_params)
+                if not result:
+                    continue
+                
+                pmids = result.get('esearchresult', {}).get('idlist', [])
+                new_pmids = [p for p in pmids if p not in seen_pmids]
+                if not new_pmids:
+                    continue
+                
+                fetch_params = {'db': 'pubmed', 'id': ','.join(new_pmids), 'retmode': 'json'}
+                result = self._make_request('esummary.fcgi', fetch_params)
+                if not result:
+                    continue
+                
+                docs = result.get('result', {})
+                for pmid in new_pmids:
+                    try:
+                        doc = docs.get(pmid, {})
+                        title = doc.get('title', '')
+                        abstract = doc.get('abstract', '') or ''
+                        if not title:
+                            continue
+                        all_papers.append({
+                            'pmid': str(pmid),
+                            'title': html.escape(str(title)[:300]),
+                            'abstract': html.escape(str(abstract)[:500]) if abstract else "[无摘要]",
+                            'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                        })
+                        seen_pmids.add(pmid)
+                    except Exception:
+                        continue
+            return all_papers
+        except Exception as e:
+            logger.error(f"Cell culture literature search error: {e}")
+            return []
 
 # ==================== 数据模型 ====================
 @dataclass
@@ -1270,7 +1502,7 @@ class HardRuleCheck:
 # ==================== 混合硬性规则引擎 ====================
 class HybridHardRulesEngine:
     """
-    混合架构：
+    混合策略：
     第一层：核心数据库（DepMap + 经典文献，高置信度，瞬时响应）
     第二层：文献补充（PubMed检索 + AI语义分析，发现新证据，动态更新）
     """
@@ -1305,7 +1537,7 @@ class HybridHardRulesEngine:
                 check = HardRuleCheck(
                     rule_name="必需基因检查（核心数据库）",
                     passed=False,
-                    reason=f"❌ {gene_name}是{source}（{desc}），敲除可能导致细胞死亡",
+                    reason=f"⌛ {gene_name}是{source}（{desc}），敲除可能导致细胞死亡",
                     source=f"DepMap数据库（{source}）",
                     pmid=pmid,
                     overrideable=False,
@@ -1330,7 +1562,7 @@ class HybridHardRulesEngine:
                 check = HardRuleCheck(
                     rule_name="毒性基因检查（核心数据库）",
                     passed=False,
-                    reason=f"❌ {gene_name}是{source}（{desc}），过表达可能导致细胞死亡",
+                    reason=f"⌛ {gene_name}是{source}（{desc}），过表达可能导致细胞死亡",
                     source=f"毒性基因数据库（{source}）",
                     pmid=pmid,
                     overrideable=False,
@@ -1349,12 +1581,11 @@ class HybridHardRulesEngine:
             # 检查核心抗病毒
             core_antiviral = CoreDatabases.check_gene(gene_name, 'antiviral')
             if core_antiviral:
-                # 修复：使用 core_antiviral 而不是 core_result
                 pmid, source, desc = core_antiviral
                 check = HardRuleCheck(
                     rule_name="抗病毒基因检查（核心数据库）",
                     passed=False,
-                    reason=f"❌ {gene_name}是{source}（{desc}），过表达可能抑制慢病毒包装",
+                    reason=f"⌛ {gene_name}是{source}（{desc}），过表达可能抑制慢病毒包装",
                     source=f"ISG数据库（{source}）",
                     pmid=pmid,
                     overrideable=False,
@@ -1370,6 +1601,7 @@ class HybridHardRulesEngine:
                 if not lit_check.passed:
                     evidence_summary['antiviral_checked'] = True
                     evidence_summary['literature_hits'].append('antiviral')
+                
                 if self.ai and self.ai.api_key:
                     evidence_summary['ai_analyzed'] = True
         
@@ -1378,7 +1610,6 @@ class HybridHardRulesEngine:
     def _check_vector_capacity(self, gene_name: str, transcripts: List[Dict]) -> HardRuleCheck:
         """载体容量检查"""
         valid_lengths = [t.get('length', 0) for t in transcripts if t.get('length', 0) > 0]
-        
         if not valid_lengths:
             return HardRuleCheck(
                 rule_name="载体容量检查（过表达）",
@@ -1390,7 +1621,6 @@ class HybridHardRulesEngine:
             )
         
         max_length = max(valid_lengths)
-        
         if max_length <= 2000:
             return HardRuleCheck(
                 rule_name="载体容量检查（过表达）",
@@ -1433,23 +1663,23 @@ class HybridHardRulesEngine:
             # 抗病毒检查：扩展关键词库 + 模糊匹配 + 评分机制
             antiviral_keywords = {
                 'high_confidence': [
-                    'inhibit virus', 'inhibit viral', 'antiviral', 'anti-viral', 
-                    'restrict virus', 'viral restriction', 'virus restriction', 
+                    'inhibit virus', 'inhibit viral', 'antiviral', 'anti-viral',
+                    'restrict virus', 'viral restriction', 'virus restriction',
                     'resist virus', 'viral resistance', 'host restriction'
                 ],
                 'immune_pathway': [
                     'innate immunity', 'interferon', 'ifn', 'isg', 'type i interferon',
-                    'immune response', 'immune defense', 'pathogen associated', 
+                    'immune response', 'immune defense', 'pathogen associated',
                     'pattern recognition', 'prr', 'tlr', 'rig-i', 'mda5', 'sting',
                     'ifitm', 'isg15', 'isg56', ' innate immune '
                 ],
                 'virus_specific': [
-                    'influenza', 'hiv', 'sars-cov', 'coronavirus', 'herpes', 
+                    'influenza', 'hiv', 'sars-cov', 'coronavirus', 'herpes',
                     'hepatitis', 'vesicular stomatitis', 'vsv', ' EMCV '
                 ],
                 'mechanism': [
-                    'host factor', 'susceptibility', 'resistance to infection', 
-                    'viral replication', 'virus entry', 'virus assembly', 
+                    'host factor', 'susceptibility', 'resistance to infection',
+                    'viral replication', 'virus entry', 'virus assembly',
                     'virus budding', 'interferon stimulated'
                 ],
                 'transcription_regulation': [
@@ -1466,11 +1696,9 @@ class HybridHardRulesEngine:
             evidence = []
             for paper in papers:
                 text = (paper.get('abstract', '') + ' ' + paper.get('title', '')).lower()
-                
                 # 计算匹配得分
                 match_score = 0
                 matched_terms = []
-                
                 for term in all_keywords:
                     if term in text:
                         match_score += 1
@@ -1484,31 +1712,30 @@ class HybridHardRulesEngine:
                 # 判定标准：匹配分>=3 或 明确包含病毒名称+免疫相关词
                 if match_score >= 3:
                     evidence.append({
-                        **paper, 
+                        **paper,
                         'match_score': match_score,
                         'matched_terms': matched_terms[:5]  # 记录前5个匹配词
                     })
                 elif match_score >= 1 and any(v in text for v in ['virus', 'viral', 'infection']):
                     # 次要标准：只要有病毒相关词且至少有1个关键词匹配
                     evidence.append({
-                        **paper, 
+                        **paper,
                         'match_score': match_score,
                         'matched_terms': matched_terms[:5]
                     })
             
             # 按匹配度排序
             evidence.sort(key=lambda x: x.get('match_score', 0), reverse=True)
-            
         else:
             # 必需性和毒性检查：保留原有的严格匹配逻辑
             target_phrases = {
                 'essential': [
-                    'lethal knockout', 'knockout is lethal', 'essential for survival', 
-                    'required for viability', 'knockout leads to death', 
+                    'lethal knockout', 'knockout is lethal', 'essential for survival',
+                    'required for viability', 'knockout leads to death',
                     'deletion is lethal', 'null mutant lethal'
                 ],
                 'toxic': [
-                    'overexpression induced cell death', 'overexpression is cytotoxic', 
+                    'overexpression induced cell death', 'overexpression is cytotoxic',
                     'overexpression triggers apoptosis', 'overexpression lethal',
                     'overexpression toxic', 'ectopic expression cell death'
                 ]
@@ -1533,7 +1760,7 @@ class HybridHardRulesEngine:
             return HardRuleCheck(
                 rule_name=f"{type_names[check_type]}检查（文献补充）",
                 passed=False,
-                reason=f"❌ 文献检索发现 {gene_name} 具有{type_names[check_type]}证据：{best_match['title'][:80]}...{match_info}",
+                reason=f"⌛ 文献检索发现 {gene_name} 具有{type_names[check_type]}证据：{best_match['title'][:80]}...{match_info}",
                 source=f"PubMed文献检索（{len(evidence)}篇明确证据，核心数据库未收录）",
                 pmid=pmid_list[0],
                 pmid_list=pmid_list,
@@ -1573,7 +1800,7 @@ class HybridHardRulesEngine:
         
         # 第一步：传统关键词筛选（减少AI调用量）
         pre_filtered = []
-        for paper in papers[:10]:  # 只分析前10篇最相关的
+        for paper in papers[:10]:  # 只分析最相关的10篇
             text = (paper.get('abstract', '') + ' ' + paper.get('title', '')).lower()
             # 宽松预筛：只要提到病毒相关就保留
             if any(kw in text for kw in ['virus', 'viral', 'infection', 'interferon', 'immunity', 'host']):
@@ -1591,7 +1818,7 @@ class HybridHardRulesEngine:
                 check_level="literature"
             )
         
-        # 第二步：AI语义分析（如果配置了API）
+        # 第二步：AI语义分析（如配置了API）
         ai_evidence = []
         if self.ai and self.ai.api_key:
             with st.spinner(f"🤖 AI正在分析{len(pre_filtered)}篇文献的抗病毒证据..."):
@@ -1602,7 +1829,6 @@ class HybridHardRulesEngine:
                             title=paper.get('title', ''),
                             abstract=paper.get('abstract', '')
                         )
-                        
                         if analysis.get('is_antiviral') and analysis.get('confidence', 0) > 0.6:
                             ai_evidence.append({
                                 **paper,
@@ -1618,14 +1844,13 @@ class HybridHardRulesEngine:
         if ai_evidence:
             best = ai_evidence[0]
             pmid_list = [p['pmid'] for p in ai_evidence[:3]]
-            
             mechanism = best.get('ai_mechanism', '未知机制')
             confidence = best.get('ai_confidence', 0)
             
             return HardRuleCheck(
                 rule_name="抗病毒基因检查（文献+AI分析）",
                 passed=False,
-                reason=f"❌ AI分析确认 {gene_name} 具有抗病毒功能（置信度: {confidence:.0%}）",
+                reason=f"⌛ AI分析确认 {gene_name} 具有抗病毒功能（置信度: {confidence:.0%}）",
                 source=f"PubMed + 通义千问AI语义分析（机制: {mechanism}）",
                 pmid=best['pmid'],
                 pmid_list=pmid_list,
@@ -1718,6 +1943,7 @@ class GeneInputComponent:
             if st.session_state[selected_key] and user_input != st.session_state[selected_key]:
                 st.session_state[selected_key] = ""
                 st.session_state[suggestions_key] = []
+            
             if len(user_input) >= 2:
                 st.rerun()
         
@@ -1728,18 +1954,18 @@ class GeneInputComponent:
                 st.session_state[suggestions_key] = suggestions
                 st.session_state[last_query_key] = user_input
                 st.rerun()
-        
-        suggestions = st.session_state.get(suggestions_key, [])
-        if suggestions and not st.session_state[selected_key]:
-            cols = st.columns(min(len(suggestions), 4))
-            for i, gene in enumerate(suggestions):
-                with cols[i % 4]:
-                    display_text = f"{gene['symbol']}"
-                    if st.button(display_text, key=f"{key_prefix}_sug_{i}", use_container_width=True):
-                        st.session_state[selected_key] = gene['symbol']
-                        st.session_state[input_key] = gene['symbol']
-                        st.session_state[f"{key_prefix}_info"] = gene
-                        st.rerun()
+            
+            suggestions = st.session_state.get(suggestions_key, [])
+            if suggestions and not st.session_state[selected_key]:
+                cols = st.columns(min(len(suggestions), 4))
+                for i, gene in enumerate(suggestions):
+                    with cols[i % 4]:
+                        display_text = f"{gene['symbol']}"
+                        if st.button(display_text, key=f"{key_prefix}_sug_{i}", use_container_width=True):
+                            st.session_state[selected_key] = gene['symbol']
+                            st.session_state[input_key] = gene['symbol']
+                            st.session_state[f"{key_prefix}_info"] = gene
+                            st.rerun()
         
         if st.session_state[selected_key] and f"{key_prefix}_info" in st.session_state:
             gene_info = st.session_state[f"{key_prefix}_info"]
@@ -1761,7 +1987,7 @@ class ReportExporter:
         <html>
         <head>
             <meta charset="UTF-8">
-            <title>慢病毒包装与细胞系构建评估报告</title>
+            <title>慢病毒包装-细胞系评估报告</title>
             <style>
                 body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }}
                 .header {{ background-color: #1f77b4; color: white; padding: 20px; text-align: center; }}
@@ -1775,7 +2001,7 @@ class ReportExporter:
         </head>
         <body>
             <div class="header">
-                <h1>慢病毒包装与细胞系构建评估报告</h1>
+                <h1>慢病毒包装-细胞系评估报告</h1>
                 <p>生成时间: {result.get('timestamp', 'N/A')}</p>
             </div>
             <div class="section">
@@ -1834,27 +2060,25 @@ class HybridAssessmentEngine:
         # 获取基因数据
         with st.spinner("🔍 检索基因详细数据..."):
             gene_info, transcripts = self.ncbi.fetch_gene_data(gene_name, organism)
-        
-        if not gene_info:
-            return {'error': f'无法获取基因 {html.escape(gene_name)} 的信息'}
-        
-        result['gene_info'] = {
-            'id': gene_info.get('id', ''),
-            'name': gene_info.get('name', ''),
-            'description': gene_info.get('description', '')[:200]
-        }
+            if not gene_info:
+                return {'error': f'无法获取基因 {html.escape(gene_name)} 的信息'}
+            
+            result['gene_info'] = {
+                'id': gene_info.get('id', ''),
+                'name': gene_info.get('name', ''),
+                'description': gene_info.get('description', '')[:200]
+            }
         
         # 混合硬性规则检查（含AI分析）
         with st.spinner("⚙️ 执行混合硬性规则检查（含AI语义分析）..."):
             hard_passed, hard_checks, evidence_summary = self.hard_rules.check_all(
                 gene_name, transcripts, experiment_type
             )
-        
-        result['decision_hierarchy']['hard_rules'] = {
-            'passed': hard_passed,
-            'checks': [asdict(c) for c in hard_checks],
-            'evidence_summary': evidence_summary
-        }
+            result['decision_hierarchy']['hard_rules'] = {
+                'passed': hard_passed,
+                'checks': [asdict(c) for c in hard_checks],
+                'evidence_summary': evidence_summary
+            }
         
         # 检查阻断
         blocking = [c for c in hard_checks if not c.passed and not c.overrideable]
@@ -1882,7 +2106,6 @@ class HybridAssessmentEngine:
                     papers_ko=papers_ko,
                     papers_general=papers_general
                 )
-                
                 result['gene_function_analysis'] = {
                     'data': function_analysis,
                     'literature_counts': {
@@ -1894,7 +2117,7 @@ class HybridAssessmentEngine:
                     'source': 'AI基于文献综合分析'
                 }
         
-        # HPA表达数据（仅Human + 输入细胞名）
+        # HPA表达数据（仅Human + 输入细胞系）
         if organism == 'Homo sapiens' and cell_line:
             with st.spinner("🧬 查询HPA表达数据..."):
                 hpa_data = self.hpa.get_expression_data(gene_name, cell_line)
@@ -1904,19 +2127,40 @@ class HybridAssessmentEngine:
                     'reliability': 'N/A'
                 }
         
-        # 细胞评估数据
+        # 细胞评估数据（含新增培养难点分析）
         if cell_line:
             with st.spinner("🧫 检索细胞相关参数..."):
+                # 原有功能
                 cell_params = self.ncbi.search_cell_lentivirus_params(cell_line)
                 transfection_params = self.ncbi.search_cell_transfection(cell_line)
                 same_cell_studies = self.ncbi.search_same_cell_gene_studies(gene_name, cell_line)
+                
+                # 新增：细胞培养难点分析
+                cell_culture_papers = self.ncbi.search_cell_culture_literature(cell_line)
+                if self.ai and self.ai.api_key:
+                    with st.spinner(f"🔬 AI正在分析 {cell_line} 的培养难点..."):
+                        culture_difficulty = self.ai.analyze_cell_culture_difficulty(
+                            cell_line=cell_line,
+                            papers=cell_culture_papers
+                        )
+                        # 新增：慢病毒易感性分析
+                        lv_susceptibility = self.ai.analyze_lentivirus_susceptibility(
+                            cell_line=cell_line,
+                            papers=cell_params if isinstance(cell_params, list) else []
+                        )
+                else:
+                    culture_difficulty = {'error': '未配置AI API'}
+                    lv_susceptibility = {'error': '未配置AI API'}
+                
                 result['cell_assessment'] = {
                     'lentivirus_params': cell_params if cell_params else '无已报道的参数',
                     'transfection_params': transfection_params if transfection_params else '无已报道的参数',
-                    'same_cell_gene_studies': same_cell_studies if same_cell_studies else '无同细胞同基因研究报道'
+                    'same_cell_gene_studies': same_cell_studies if same_cell_studies else '无同细胞同基因研究报道',
+                    'culture_difficulty': culture_difficulty,  # 新增
+                    'lentivirus_susceptibility': lv_susceptibility  # 新增
                 }
         
-        # 序列设计检索（敲低/敲除）- 使用AI直接设计
+        # 序列设计检索（敲低/敲除）
         if experiment_type.lower() in ['knockdown', 'knockout']:
             if self.ai and self.ai.api_key:
                 with st.spinner("🧬 AI正在设计序列并提供参考文献..."):
@@ -1946,21 +2190,12 @@ class HybridAssessmentEngine:
                         }
             else:
                 # 未配置AI时回退到文献检索
-                with st.spinner("🎯 检索序列设计文献（未配置AI，使用文献检索）..."):
-                    if experiment_type.lower() == 'knockdown':
-                        sequences = self.ncbi.search_sirna_sequences(gene_name)
-                        result['sequence_designs'] = {
-                            'type': 'siRNA/shRNA',
-                            'designs': sequences if sequences else '无已报道的设计',
-                            'source': 'PubMed文献检索'
-                        }
-                    else:
-                        sequences = self.ncbi.search_sgrna_sequences(gene_name)
-                        result['sequence_designs'] = {
-                            'type': 'sgRNA',
-                            'designs': sequences if sequences else '无已报道的设计',
-                            'source': 'PubMed文献检索'
-                        }
+                with st.spinner("📚 检索序列设计文献（未配置AI，使用文献检索）..."):
+                    result['sequence_designs'] = {
+                        'type': '序列设计',
+                        'designs': '未配置AI API，无法提供智能设计',
+                        'source': 'N/A'
+                    }
         
         # 生成建议
         warning_checks = [c for c in hard_checks if not c.passed and c.overrideable]
@@ -1978,10 +2213,11 @@ def render_sidebar():
     """渲染侧边栏"""
     with st.sidebar:
         st.header("⚙️ API配置")
+        
         st.subheader("NCBI配置")
-        ncbi_email = st.text_input("NCBI邮箱", value="", key="ncbi_email_input", 
+        ncbi_email = st.text_input("NCBI邮箱", value="", key="ncbi_email_input",
                                    help="优先使用此处输入，留空使用Secrets")
-        ncbi_key = st.text_input("NCBI API Key", type="password", key="ncbi_key_input", 
+        ncbi_key = st.text_input("NCBI API Key", type="password", key="ncbi_key_input",
                                 help="可选，用于提高访问频率限制")
         
         email, key, error = APIConfig.get_ncbi_credentials()
@@ -1991,8 +2227,9 @@ def render_sidebar():
             st.success("✅ NCBI API有效")
         
         st.divider()
+        
         st.subheader("AI配置（可选）")
-        qwen_key = st.text_input("通义千问API Key", type="password", key="qwen_key_input", 
+        qwen_key = st.text_input("通义千问API Key", type="password", key="qwen_key_input",
                                 help="可选，用于AI文献语义分析（增强抗病毒检测）和序列设计")
         
         final_qwen = APIConfig.get_qwen_api_key()
@@ -2007,14 +2244,14 @@ def render_sidebar():
 def render_main_panel():
     """渲染主面板"""
     st.markdown("""
-    <h1 style='text-align: center; color: #1f77b4; margin-bottom: 30px;'>
-        🧬 慢病毒包装与细胞系构建评估系统
-    </h1>
+        <h1 style='text-align: center; color: #1f77b4; margin-bottom: 30px;'>
+        🧬 慢病毒包装-细胞系评估系统
+        </h1>
     """, unsafe_allow_html=True)
     
     st.markdown("### 🔬 实验参数输入")
-    col1, col2 = st.columns(2)
     
+    col1, col2 = st.columns(2)
     with col1:
         organism = st.selectbox(
             "物种",
@@ -2028,13 +2265,15 @@ def render_main_panel():
                 "monkey": "猴子 (Macaca mulatta)"
             }.get(x, x)
         )
+        
         gene_service = GeneAutocompleteService()
         gene_component = GeneInputComponent(gene_service)
         gene = gene_component.render(organism, key_prefix="main_gene")
     
     with col2:
-        cell_line = st.text_input("细胞名（可选）", placeholder="例如：HEK293T, HeLa, A549", 
-                                 help="输入细胞系名称以获取特定细胞系的感染参数和HPA表达数据")
+        cell_line = st.text_input("细胞系（可选）", placeholder="例如：HEK293T, HeLa, A549",
+                                 help="输入细胞系名称以获取特定细胞系的感染参数、HPA表达数据和培养难点分析")
+        
         exp_type = st.selectbox(
             "评估选项",
             ["overexpression", "knockdown", "knockout"],
@@ -2046,6 +2285,7 @@ def render_main_panel():
         )
     
     analyze = st.button("🚀 开始AI智能评估", type="primary", use_container_width=True)
+    
     return organism, gene, cell_line, exp_type, analyze
 
 def render_results(result: Dict):
@@ -2055,7 +2295,7 @@ def render_results(result: Dict):
         return
     
     st.divider()
-    st.markdown(f"## 🎯 评估报告 - {html.escape(result['gene'])}")
+    st.markdown(f"## 📋 评估报告 - {html.escape(result['gene'])}")
     
     # 导出按钮
     col_exp1, col_exp2 = st.columns(2)
@@ -2079,19 +2319,19 @@ def render_results(result: Dict):
     
     # 评估结论
     rec = result['final_recommendation']
-    rec_color = {"❌": "#ffebee", "⚠️": "#fff3e0", "⚡": "#fff8e1", "✅": "#e8f5e9"}.get(rec[:2], "#f5f5f5")
+    rec_color = {"⌛": "#ffebee", "⚠️": "#fff3e0", "⚡": "#fff8e1", "✅": "#e8f5e9"}.get(rec[:2], "#f5f5f5")
     
     st.markdown(f"""
-    <div style='padding: 20px; background-color: {rec_color}; 
-                border-radius: 10px; text-align: center; margin: 20px 0;
-                border: 2px solid #ddd;'>
-        <h3>{html.escape(rec)}</h3>
-        <small>{html.escape(result.get('primary_basis', ''))}</small>
-    </div>
+        <div style='padding: 20px; background-color: {rec_color};
+        border-radius: 10px; text-align: center; margin: 20px 0;
+        border: 2px solid #ddd;'>
+            <h3>{html.escape(rec)}</h3>
+            <small>{html.escape(result.get('primary_basis', ''))}</small>
+        </div>
     """, unsafe_allow_html=True)
     
-    # 标签页 - 新增"基因功能分析"
-    tabs = st.tabs(["硬性规则检查", "基因功能分析", "HPA表达数据", "细胞评估", "序列设计"])
+    # 标签页 - 新增"细胞培养难点"标签
+    tabs = st.tabs(["硬性规则检查", "基因功能分析", "HPA表达数据", "细胞评估（含培养难点）", "序列设计"])
     
     with tabs[0]:
         st.markdown("### 🚦 混合硬性规则检查（核心数据库+文献补充+AI语义分析）")
@@ -2114,7 +2354,7 @@ def render_results(result: Dict):
         st.divider()
         
         for check in hard_rules.get('checks', []):
-            icon = "✅" if check['passed'] else "❌" if not check['overrideable'] else "⚠️"
+            icon = "✅" if check['passed'] else "⌛" if not check['overrideable'] else "⚠️"
             color = "green" if check['passed'] else "red" if not check['overrideable'] else "orange"
             level_badge = "🔴 核心" if check.get('check_level') == "core" else "🔵 文献"
             
@@ -2124,16 +2364,13 @@ def render_results(result: Dict):
                 for paper in check['evidence_papers'][:2]:
                     pmid = paper.get('pmid', '')
                     title = paper.get('title', '')[:80]
-                    
                     # 显示AI分析结果
                     ai_info = ""
                     if 'ai_confidence' in paper:
                         ai_info = f"<br/><small>🤖 AI置信度: {paper['ai_confidence']:.0%} | 机制: {paper.get('ai_mechanism', '未知')}</small>"
-                    
                     match_info = ""
                     if 'match_score' in paper:
                         match_info = f" [匹配度:{paper['match_score']}]"
-                    
                     evidence_md += f'<small>• <a href="https://pubmed.ncbi.nlm.nih.gov/{pmid}/" target="_blank">PMID:{pmid}</a> {html.escape(title)}...{match_info}</small>{ai_info}<br/>'
             
             pmid_list = check.get('pmid_list', [])
@@ -2142,20 +2379,18 @@ def render_results(result: Dict):
                 pmid_badge = f'<br/><small>PMID: {", ".join([f"<a href=\'https://pubmed.ncbi.nlm.nih.gov/{p}/\' target=\'_blank\'>{p}</a>" for p in pmid_list[:3]])}</small>'
             
             st.markdown(f"""
-            <div style='padding: 15px; border-left: 4px solid {color}; 
-                        background-color: #f8f9fa; margin: 10px 0; border-radius: 5px;'>
-                <h4>{icon} {html.escape(check['rule_name'])} {level_badge}</h4>
-                <p>{html.escape(check['reason'])}</p>
-                <small>来源: {html.escape(check['source'])}</small>
-                {pmid_badge}
-                {evidence_md}
-            </div>
+                <div style='padding: 15px; border-left: 4px solid {color};
+                background-color: #f8f9fa; margin: 10px 0; border-radius: 5px;'>
+                    <h4>{icon} {html.escape(check['rule_name'])} {level_badge}</h4>
+                    <p>{html.escape(check['reason'])}</p>
+                    <small>来源: {html.escape(check['source'])}</small>
+                    {pmid_badge}
+                    {evidence_md}
+                </div>
             """, unsafe_allow_html=True)
     
-    # 新增：基因功能分析标签页
     with tabs[1]:
         st.markdown("### 📖 基因功能全面分析（基于AI文献综合）")
-        
         func_analysis = result.get('gene_function_analysis', {})
         if func_analysis and not func_analysis.get('data', {}).get('error'):
             data = func_analysis.get('data', {})
@@ -2190,10 +2425,10 @@ def render_results(result: Dict):
                         for model in oe['cell_models']:
                             with st.container():
                                 st.markdown(f"""
-                                - **细胞系**: {model.get('cell_line', 'N/A')}  
-                                  **表型**: {model.get('phenotype', 'N/A')}  
-                                  **机制**: {model.get('mechanism', 'N/A')}  
-                                  **文献**: {model.get('reference', 'N/A')}
+                                    - **细胞系**: {model.get('cell_line', 'N/A')}
+                                    **表型**: {model.get('phenotype', 'N/A')}
+                                    **机制**: {model.get('mechanism', 'N/A')}
+                                    **文献**: {model.get('reference', 'N/A')}
                                 """)
                     else:
                         st.info("未见细胞水平过表达报道")
@@ -2202,9 +2437,9 @@ def render_results(result: Dict):
                         st.markdown("**动物模型:**")
                         for model in oe['animal_models']:
                             st.markdown(f"""
-                            - **模型**: {model.get('model', 'N/A')}  
-                              **表型**: {model.get('phenotype', 'N/A')}  
-                              **文献**: {model.get('reference', 'N/A')}
+                                - **模型**: {model.get('model', 'N/A')}
+                                **表型**: {model.get('phenotype', 'N/A')}
+                                **文献**: {model.get('reference', 'N/A')}
                             """)
                     else:
                         st.info("未见动物模型过表达报道")
@@ -2220,10 +2455,10 @@ def render_results(result: Dict):
                         st.markdown("**细胞模型:**")
                         for model in kd['cell_models']:
                             st.markdown(f"""
-                            - **细胞系**: {model.get('cell_line', 'N/A')}  
-                              **方法**: {model.get('method', 'N/A')}  
-                              **表型**: {model.get('phenotype', 'N/A')}  
-                              **文献**: {model.get('reference', 'N/A')}
+                                - **细胞系**: {model.get('cell_line', 'N/A')}
+                                **方法**: {model.get('method', 'N/A')}
+                                **表型**: {model.get('phenotype', 'N/A')}
+                                **文献**: {model.get('reference', 'N/A')}
                             """)
                     else:
                         st.info("未见敲低报道")
@@ -2235,28 +2470,27 @@ def render_results(result: Dict):
             if 'knockout' in data:
                 with st.expander("🚫 敲除效应（Knockout）"):
                     ko = data['knockout']
-                    
                     if 'cell_models' in ko and ko['cell_models']:
                         st.markdown("**细胞模型:**")
                         for model in ko['cell_models']:
                             st.markdown(f"""
-                            - **细胞系**: {model.get('cell_line', 'N/A')}  
-                              **方法**: {model.get('method', 'N/A')}  
-                              **表型**: {model.get('phenotype', 'N/A')}  
-                              **细胞活力影响**: {model.get('viability', 'N/A')}  
-                              **文献**: {model.get('reference', 'N/A')}
+                                - **细胞系**: {model.get('cell_line', 'N/A')}
+                                **方法**: {model.get('method', 'N/A')}
+                                **表型**: {model.get('phenotype', 'N/A')}
+                                **细胞活力影响**: {model.get('viability', 'N/A')}
+                                **文献**: {model.get('reference', 'N/A')}
                             """)
                     else:
-                        st.info("未见细胞敲除报道")
+                        st.info("未见细胞水平敲除报道")
                     
                     if 'animal_models' in ko and ko['animal_models']:
                         st.markdown("**动物模型:**")
                         for model in ko['animal_models']:
                             st.markdown(f"""
-                            - **模型**: {model.get('model', 'N/A')}  
-                              **表型**: {model.get('phenotype', 'N/A')}  
-                              **致死性**: {model.get('lethality', 'N/A')}  
-                              **文献**: {model.get('reference', 'N/A')}
+                                - **模型**: {model.get('model', 'N/A')}
+                                **表型**: {model.get('phenotype', 'N/A')}
+                                **致死性**: {model.get('lethality', 'N/A')}
+                                **文献**: {model.get('reference', 'N/A')}
                             """)
                     else:
                         st.info("未见动物敲除报道")
@@ -2281,7 +2515,6 @@ def render_results(result: Dict):
                 with st.expander("📚 关键参考文献"):
                     for ref in data['key_references']:
                         st.markdown(f"- {ref}")
-        
         else:
             st.info("⚠️ 未配置AI API或未获取到功能分析数据。请在侧边栏配置通义千问API Key以启用此功能。")
     
@@ -2297,53 +2530,146 @@ def render_results(result: Dict):
                     st.metric("蛋白水平", hpa_data.get('protein_level', 'N/A'))
                 with col3:
                     st.metric("可靠性", hpa_data.get('reliability', 'N/A'))
+                
                 gene = result['gene']
                 st.markdown(f"[查看HPA详情](https://www.proteinatlas.org/{gene}-{result.get('cell_line', '')})")
             else:
                 st.info(hpa_data.get('message', '数据难以获得'))
         else:
-            st.info("⚠️ 仅当物种为人类且输入细胞名时显示HPA数据")
+            st.info("⚠️ 仅当物种为人类且输入细胞系时显示HPA数据")
     
+    # ==================== 新增：细胞评估（含培养难点）====================
     with tabs[3]:
-        st.markdown("### 🧫 细胞系构建评估数据")
+        st.markdown("### 🧫 细胞系评估数据")
         cell_data = result.get('cell_assessment')
         if cell_data:
+            # 原有：同细胞同基因文献
             st.subheader("📚 同细胞同基因文献")
             studies = cell_data.get('same_cell_gene_studies')
             if studies and studies != '无同细胞同基因研究报道':
                 for study in studies[:5]:
                     st.markdown(f"""
-                    - **{html.escape(study.get('title', ''))}**  
-                      {html.escape(study.get('journal', ''))} ({study.get('year', '')})  
-                      [PMID: {study.get('pmid', '')}]({study.get('url', '')})
+                        - **{html.escape(study.get('title', ''))}**
+                        {html.escape(study.get('journal', ''))} ({study.get('year', '')})
+                        [PMID: {study.get('pmid', '')}]({study.get('url', '')})
                     """)
             else:
                 st.warning(studies if isinstance(studies, str) else "无已报道的研究")
             
-            st.subheader("🦠 慢病毒MOI参数")
-            params = cell_data.get('lentivirus_params')
-            if params and params != '无已报道的参数':
-                for param in params[:5]:
-                    st.markdown(f"- [PMID: {param.get('pmid', '')}]({param.get('url', '')}) - {param.get('note', '')}")
-            else:
-                st.warning("无已报道的参数")
+            st.divider()
             
-            st.subheader("⚡ 转染/电转条件")
-            trans = cell_data.get('transfection_params')
-            if trans and trans != '无已报道的参数':
-                for t in trans[:5]:
-                    st.markdown(f"- [PMID: {t.get('pmid', '')}]({t.get('url', '')}) - {t.get('note', '')}")
+            # ==================== 新增：细胞培养难点清单 ====================
+            st.subheader("⚠️ 细胞培养难点清单（非评分制）")
+            culture_diff = cell_data.get('culture_difficulty', {})
+            
+            if culture_diff and not culture_diff.get('error'):
+                # 用颜色标签展示不同类别
+                categories = {
+                    'culture_medium': ('🧪', '培养基特殊要求', '#ffebee'),
+                    'coating_matrix': ('🔬', '基质/包被要求', '#f3e5f5'),
+                    'environment': ('🌡️', '气体/环境敏感', '#e3f2fd'),
+                    'operation': ('⚙️', '操作复杂度', '#fff3e0'),
+                    'time_cost': ('⏱️', '时间/成本', '#e8f5e9'),
+                    'special_warnings': ('🚨', '关键警告', '#ffcdd2'),
+                    'protocol_tips': ('💡', 'Protocol建议', '#e0f7fa')
+                }
+                
+                has_any_difficulty = False
+                for key, (emoji, title, bg_color) in categories.items():
+                    items = culture_diff.get(key, [])
+                    if items and len(items) > 0:
+                        has_any_difficulty = True
+                        with st.expander(f"{emoji} {title} ({len(items)}项)", expanded=True):
+                            for item in items:
+                                st.markdown(f"""
+                                    <div style='margin: 5px 0; padding: 8px; background-color: {bg_color};
+                                    border-radius: 5px; border-left: 3px solid #666;'>
+                                        • {html.escape(item)}
+                                    </div>
+                                """, unsafe_allow_html=True)
+                
+                if not has_any_difficulty:
+                    st.success("✅ 未检索到该细胞系的特殊培养难点，可能为常规培养细胞")
+                
+                # 支持文献
+                if 'verified_by' in culture_diff and culture_diff['verified_by']:
+                    with st.expander("📚 支持文献"):
+                        for ref in culture_diff['verified_by']:
+                            st.markdown(f"- {ref}")
             else:
-                st.warning("无已报道的参数")
+                st.info("⚠️ 未获取到培养难点分析数据（需配置AI API）")
+            
+            st.divider()
+            
+            # ==================== 新增：慢病毒易感性分析 ====================
+            st.subheader("🦠 慢病毒易感性分析")
+            lv_susc = cell_data.get('lentivirus_susceptibility', {})
+            
+            if lv_susc and not lv_susc.get('error'):
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    level = lv_susc.get('susceptibility_level', 'Unknown')
+                    color = {'High': 'green', 'Medium': 'orange', 'Low': 'red'}.get(level, 'gray')
+                    st.metric("易感性等级", level)
+                with col2:
+                    st.metric("推荐MOI", lv_susc.get('recommended_moi', 'N/A'))
+                with col3:
+                    st.metric("典型感染效率", lv_susc.get('infection_efficiency', 'N/A'))
+                
+                # 具体要求
+                reqs = []
+                if lv_susc.get('requires_polybrene') == '是':
+                    reqs.append("需要Polybrene")
+                if lv_susc.get('requires_spinfection') == '是':
+                    reqs.append("需要离心感染(spinoculation)")
+                if lv_susc.get('requires_pseudotyping') == '是':
+                    reqs.append(f"需要特殊包膜: {lv_susc.get('requires_pseudotyping')}")
+                
+                if reqs:
+                    st.warning("**特殊要求**: " + " | ".join(reqs))
+                
+                # 挑战与优化
+                if lv_susc.get('challenges'):
+                    with st.expander("⚠️ 感染挑战"):
+                        for challenge in lv_susc['challenges']:
+                            st.markdown(f"- {challenge}")
+                
+                if lv_susc.get('optimization_tips'):
+                    with st.expander("💡 优化建议"):
+                        for tip in lv_susc['optimization_tips']:
+                            st.markdown(f"- {tip}")
+            else:
+                st.info("⚠️ 未获取到慢病毒易感性分析（需配置AI API）")
+            
+            st.divider()
+            
+            # 原有：MOI参数和转染条件
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("🦠 慢病毒MOI参数")
+                params = cell_data.get('lentivirus_params')
+                if params and params != '无已报道的参数':
+                    for param in params[:5]:
+                        st.markdown(f"- [PMID: {param.get('pmid', '')}]({param.get('url', '')}) - {param.get('note', '')}")
+                else:
+                    st.warning("无已报道的参数")
+            
+            with col2:
+                st.subheader("⚡ 转染/电转条件")
+                trans = cell_data.get('transfection_params')
+                if trans and trans != '无已报道的参数':
+                    for t in trans[:5]:
+                        st.markdown(f"- [PMID: {t.get('pmid', '')}]({t.get('url', '')}) - {t.get('note', '')}")
+                else:
+                    st.warning("无已报道的参数")
         else:
-            st.info("⚠️ 输入细胞名以获取细胞评估数据")
+            st.info("⚠️ 输入细胞系以获取细胞评估数据")
     
     with tabs[4]:
-        st.markdown("### 🎯 序列设计参考")
+        st.markdown("### 🧬 序列设计参考")
         seq_data = result.get('sequence_designs')
         if seq_data:
             st.subheader(f"{seq_data.get('type', '')}")
-            
             # 显示数据来源
             source_info = seq_data.get('source', '')
             if 'AI' in source_info:
@@ -2360,7 +2686,7 @@ def render_results(result: Dict):
                     for i, seq in enumerate(designs.get('sequences', [])):
                         with st.expander(f"候选序列 #{i+1}: {seq.get('target_seq', 'N/A')}"):
                             st.write(f"**靶序列**: `{seq.get('target_seq', 'N/A')}`")
-                            st.write(f"**靶向区域**: {seq.get('target_region', 'N/A')}")
+                            st.write(f"**靶标区域**: {seq.get('target_region', 'N/A')}")
                             st.write(f"**设计原理**: {seq.get('design_rationale', 'N/A')}")
                             st.write(f"**预期效率**: {seq.get('efficiency_score', 'N/A')}")
                             
@@ -2373,8 +2699,8 @@ def render_results(result: Dict):
                                     with st.container():
                                         col1, col2 = st.columns([3, 1])
                                         with col1:
-                                            st.markdown(f"*{html.escape(ref.get('title', ''))}*  \n"
-                                                      f"{html.escape(ref.get('authors', ''))} ({ref.get('year', '')})  \n"
+                                            st.markdown(f"*{html.escape(ref.get('title', ''))}* \n"
+                                                      f"{html.escape(ref.get('authors', ''))} ({ref.get('year', '')}) \n"
                                                       f"*{html.escape(ref.get('source', ''))}*")
                                         with col2:
                                             pmid = ref.get('pmid_or_patent', '')
@@ -2405,8 +2731,8 @@ def render_results(result: Dict):
                                     with st.container():
                                         col1, col2 = st.columns([3, 1])
                                         with col1:
-                                            st.markdown(f"*{html.escape(ref.get('title', ''))}*  \n"
-                                                      f"{html.escape(ref.get('authors', ''))} ({ref.get('year', '')})  \n"
+                                            st.markdown(f"*{html.escape(ref.get('title', ''))}* \n"
+                                                      f"{html.escape(ref.get('authors', ''))} ({ref.get('year', '')}) \n"
                                                       f"*{html.escape(ref.get('source', ''))}*")
                                         with col2:
                                             pmid = ref.get('pmid_or_patent', '')
@@ -2432,22 +2758,20 @@ def render_results(result: Dict):
                 # 显示通用注意事项
                 if 'notes' in designs:
                     st.info(f"💡 **注意事项**: {designs['notes']}")
-                
                 if 'validation_method' in designs:
                     st.success(f"✅ **验证建议**: {designs['validation_method']}")
-            
+                
             # 处理传统文献检索结果
             elif isinstance(designs, list):
                 if designs and designs != '无已报道的设计':
                     for design in designs[:5]:
                         st.markdown(f"""
-                        - **类型**: {design.get('type', '')}  
-                          **说明**: {design.get('note', '')}  
-                          [查看文献 (PMID: {design.get('pmid', '')})]({design.get('url', '')})
+                            - **类型**: {design.get('type', '')}
+                            **说明**: {design.get('note', '')}
+                            [查看文献 (PMID: {design.get('pmid', '')})]({design.get('url', '')})
                         """)
                 else:
                     st.warning("无已报道的设计")
-            
             else:
                 st.error("序列设计数据格式异常")
         else:
@@ -2512,12 +2836,11 @@ def main():
             
             with st.spinner("正在进行混合策略评估（核心数据库+文献补充+AI语义分析）..."):
                 result = engine.assess(gene_clean, organism_clean, cell_clean, exp_type)
-            
-            render_results(result)
-            
+                render_results(result)
+                
         except Exception as e:
             logger.exception(f"Unhandled error: {e}")
-            st.error(f"❌ 系统错误: {str(e)}")  # 显示具体错误信息便于调试
+            st.error(f"⌛ 系统错误: {str(e)}")  # 显示具体错误信息便于调试
 
 if __name__ == "__main__":
     main()
