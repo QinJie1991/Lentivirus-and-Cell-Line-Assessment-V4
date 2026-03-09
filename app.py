@@ -36,7 +36,7 @@ st.set_page_config(
 
 # ==================== AI分析客户端 ====================
 class AIAnalysisClient:
-    """通义千问API客户端 - 用于文献语义分析"""
+    """通义千问API客户端 - 用于文献语义分析和序列设计"""
     
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key
@@ -137,6 +137,426 @@ class AIAnalysisClient:
                 'mechanism': '',
                 'reasoning': f'API调用失败: {str(e)}'
             }
+    
+    def analyze_gene_function_comprehensive(self, gene_name: str, gene_description: str, 
+                                           papers_oe: List[Dict], papers_kd: List[Dict], 
+                                           papers_ko: List[Dict], papers_general: List[Dict]) -> Dict:
+        """
+        综合分析基因功能及不同实验模型的表型
+        
+        返回: {
+            'protein_function': {
+                'category': '蛋白类别（转录因子/酶/受体等）',
+                'domains': '结构域',
+                'pathways': '涉及的信号通路',
+                'cellular_location': '亚细胞定位'
+            },
+            'overexpression': {
+                'cell_models': [{'cell_line': '细胞系', 'phenotype': '表型', 'reference': '文献'}],
+                'animal_models': [{'model': '动物模型', 'phenotype': '表型', 'reference': '文献'}],
+                'summary': '过表达效应总结'
+            },
+            'knockdown': {
+                'cell_models': [...],
+                'summary': '敲低效应总结'
+            },
+            'knockout': {
+                'cell_models': [...],
+                'animal_models': [...],
+                'summary': '敲除效应总结'
+            },
+            'disease_relevance': '疾病相关性',
+            'key_references': ['关键文献列表']
+        }
+        """
+        if not self.api_key:
+            return {'error': '未配置AI API'}
+        
+        # 构建文献摘要文本
+        def format_papers(papers, label):
+            text = f"\n{label}文献：\n"
+            for i, p in enumerate(papers[:5], 1):
+                text += f"{i}. {p.get('title', '')} - {p.get('abstract', '')[:300]}...\n"
+            return text
+        
+        literature_text = ""
+        if papers_general:
+            literature_text += format_papers(papers_general, "基因功能相关")
+        if papers_oe:
+            literature_text += format_papers(papers_oe, "过表达")
+        if papers_kd:
+            literature_text += format_papers(papers_kd, "敲低/敲除")
+        if papers_ko:
+            literature_text += format_papers(papers_ko, "敲除")
+        
+        prompt = f"""作为分子生物学和遗传学专家，请基于以下文献信息，全面总结基因"{gene_name}"（{gene_description}）的功能及实验模型数据。
+
+{literature_text}
+
+请按以下JSON格式提供结构化总结（只返回JSON）：
+{{
+    "protein_function": {{
+        "category": "蛋白功能类别（如：锌指转录因子、丝氨酸蛋白酶、GPCR受体等）",
+        "domains": "主要结构域及其功能",
+        "pathways": "参与的关键信号通路",
+        "cellular_location": "亚细胞定位",
+        "tissue_expression": "主要表达组织"
+    }},
+    "overexpression": {{
+        "cell_models": [
+            {{
+                "cell_line": "细胞系名称",
+                "phenotype": "观察到的表型（如：促进增殖、诱导凋亡、EMT转化等）",
+                "mechanism": "分子机制",
+                "reference": "文献来源（作者, 年份, 期刊）"
+            }}
+        ],
+        "animal_models": [
+            {{
+                "model": "动物模型（如：转基因小鼠、尾静脉注射等）",
+                "phenotype": "表型",
+                "reference": "文献来源"
+            }}
+        ],
+        "summary": "过表达效应的总体特征"
+    }},
+    "knockdown": {{
+        "cell_models": [
+            {{
+                "cell_line": "细胞系",
+                "method": "敲低方法（siRNA/shRNA）",
+                "phenotype": "表型",
+                "reference": "文献来源"
+            }}
+        ],
+        "summary": "敲低效应的总体特征"
+    }},
+    "knockout": {{
+        "cell_models": [
+            {{
+                "cell_line": "细胞系",
+                "method": "敲除方法（CRISPR/TALEN）",
+                "phenotype": "表型",
+                "viability": "是否影响细胞活力",
+                "reference": "文献来源"
+            }}
+        ],
+        "animal_models": [
+            {{
+                "model": "动物模型",
+                "phenotype": "表型（如：胚胎致死、发育缺陷、代谢异常等）",
+                "lethality": "致死性",
+                "reference": "文献来源"
+            }}
+        ],
+        "summary": "敲除效应的总体特征"
+    }},
+    "disease_relevance": {{
+        "cancer": "在肿瘤中的作用（促癌/抑癌）及相关癌症类型",
+        "other_diseases": "其他疾病相关性",
+        "therapeutic_potential": "治疗潜力评估"
+    }},
+    "key_references": [
+        "格式：作者 et al., 年份, 期刊, PMID（仅列出最关键3-5篇）"
+    ],
+    "experimental_notes": "实验设计建议（如：敲除是否致死、过表达是否诱导凋亡等注意事项）"
+}}
+
+要求：
+1. 基于提供的文献如实总结，没有的数据标注"未见报道"
+2. 区分细胞水平和动物水平的数据
+3. 重点关注与慢病毒包装相关的因素（如：是否影响细胞活力、是否调控病毒相关通路）
+4. 文献格式要规范，包含PMID"""
+
+        try:
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                'model': 'qwen-turbo',
+                'input': {
+                    'messages': [
+                        {'role': 'system', 'content': '你是分子生物学专家，精通基因功能注释和表型分析，擅长从文献中提取关键实验数据。'},
+                        {'role': 'user', 'content': prompt}
+                    ]
+                },
+                'parameters': {
+                    'result_format': 'message',
+                    'max_tokens': 3000,
+                    'temperature': 0.2
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
+            
+            # 解析JSON
+            try:
+                content_clean = content.replace('```json', '').replace('```', '').strip()
+                analysis = json.loads(content_clean)
+                return analysis
+            except json.JSONDecodeError:
+                logger.error(f"AI功能分析返回非JSON格式: {content}")
+                return {
+                    'error': 'AI返回格式异常',
+                    'raw_response': content[:1000]
+                }
+                
+        except Exception as e:
+            logger.error(f"AI功能分析失败: {e}")
+            return {'error': str(e)}
+    
+    def design_rnai_sequences(self, gene_name: str, gene_id: str = "", gene_description: str = "") -> Dict:
+        """
+        使用AI设计siRNA/shRNA序列，并返回推荐序列及来源文献/专利
+        
+        返回: {
+            'sequences': [
+                {
+                    'target_seq': '正义链序列(19-21nt)',
+                    'design_rationale': '设计原理（靶向区域、GC含量等）',
+                    'efficiency_score': '预期效率评分',
+                    'references': [
+                        {
+                            'type': '文献/专利',
+                            'title': '标题',
+                            'authors': '作者/发明人',
+                            'year': '年份',
+                            'source': '期刊/专利号',
+                            'pmid_or_patent': 'PMID或专利号',
+                            'url': '链接'
+                        }
+                    ]
+                }
+            ],
+            'notes': '设计注意事项',
+            'validation_method': '推荐的验证方法'
+        }
+        """
+        if not self.api_key:
+            return {'error': '未配置AI API', 'sequences': []}
+        
+        try:
+            prompt = f"""作为RNAi序列设计专家，请为基因"{gene_name}"（Gene ID: {gene_id}, 描述: {gene_description}）设计siRNA/shRNA序列。
+
+请基于最新的文献和公开数据库知识，提供：
+1. 3条高质量的siRNA靶序列（19-21nt，不包含悬垂端）
+2. 每条序列的设计依据（靶向哪个外显子、GC含量、特异性考虑）
+3. 支持这些设计的参考文献或专利（真实存在的文献，优先选择高被引文献或经典方法论文）
+
+请按以下JSON格式回答（只返回JSON）：
+{{
+    "sequences": [
+        {{
+            "target_seq": "AAGUCGAGUAGCGAAGCUUTT",
+            "target_region": "CDS区域，第123-141位",
+            "design_rationale": "GC含量45%，避开UTR和SNP区域，无连续G/C",
+            "efficiency_score": "高（预期敲低效率>80%）",
+            "references": [
+                {{
+                    "type": "文献",
+                    "title": "Specificity of RNA interference in mammalian cells",
+                    "authors": "Elbashir et al.",
+                    "year": "2001",
+                    "source": "Nature",
+                    "pmid_or_patent": "PMID:11252768",
+                    "url": "https://pubmed.ncbi.nlm.nih.gov/11252768/"
+                }}
+            ]
+        }}
+    ],
+    "shrna_vector_design": {{
+        "loop_sequence": "TTCAAGAGA",
+        "promoter": "U6或H1",
+        "cloning_sites": "BamHI/EcoRI",
+        "notes": "建议使用pLKO.1或pSUPER载体系统"
+    }},
+    "notes": "建议使用BLAST验证特异性，避免脱靶效应；推荐设计阴性对照（scrambled）",
+    "validation_method": "Western blot或qPCR检测mRNA水平，建议检测时间点在转染后48-72小时"
+}}
+
+要求：
+1. 序列必须是真实的、经过验证的设计原则
+2. 参考文献必须是真实存在的经典文献（2000-2024年间）
+3. 如果基因有已发表的有效siRNA序列（如来自Dharmacon、Sigma等数据库的验证序列），请优先列出
+4. 提供具体的载体构建建议"""
+
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                'model': 'qwen-turbo',
+                'input': {
+                    'messages': [
+                        {'role': 'system', 'content': '你是RNA干扰(RNAi)技术专家，精通siRNA/shRNA序列设计和慢病毒载体构建，熟悉相关领域的经典文献和专利。'},
+                        {'role': 'user', 'content': prompt}
+                    ]
+                },
+                'parameters': {
+                    'result_format': 'message',
+                    'max_tokens': 2000,
+                    'temperature': 0.2
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
+            
+            # 解析JSON
+            try:
+                content_clean = content.replace('```json', '').replace('```', '').strip()
+                design_data = json.loads(content_clean)
+                return design_data
+            except json.JSONDecodeError:
+                logger.error(f"AI序列设计返回非JSON格式: {content}")
+                return {
+                    'error': 'AI返回格式异常',
+                    'sequences': [],
+                    'raw_response': content[:500]
+                }
+                
+        except Exception as e:
+            logger.error(f"AI序列设计失败: {e}")
+            return {'error': str(e), 'sequences': []}
+    
+    def design_crispr_sequences(self, gene_name: str, gene_id: str = "", gene_description: str = "") -> Dict:
+        """
+        使用AI设计CRISPR/sgRNA序列，并返回推荐序列及来源文献/专利
+        
+        返回: {
+            'sgrnas': [
+                {
+                    'sequence': '20nt靶序列（不含NGG）',
+                    'pam': 'NGG',
+                    'target_exon': '靶向外显子',
+                    'design_tool': '设计工具（如Benchling、CRISPOR等）',
+                    'efficiency_score': '效率评分',
+                    'off_target_risk': '脱靶风险',
+                    'references': [...]
+                }
+            ],
+            'delivery_notes': '慢病毒载体递送建议',
+            'validation_method': '验证方法'
+        }
+        """
+        if not self.api_key:
+            return {'error': '未配置AI API', 'sgrnas': []}
+        
+        try:
+            prompt = f"""作为CRISPR基因编辑专家，请为基因"{gene_name}"（Gene ID: {gene_id}, 描述: {gene_description}）设计sgRNA序列。
+
+请基于最新的文献和公开数据库知识，提供：
+1. 3-4条高活性的sgRNA序列（20nt，不含PAM）
+2. 每条序列的详细信息（靶向外显子、PAM序列、预测效率、脱靶风险）
+3. 支持这些设计的参考文献或专利（如Brunello、GeCKO文库相关文献）
+
+请按以下JSON格式回答（只返回JSON）：
+{{
+    "sgrnas": [
+        {{
+            "sequence": "GAGUCCGAGCAGAAGAAGAA",
+            "pam": "NGG",
+            "target_exon": "Exon 3",
+            "cut_site": "距离起始密码子+156bp",
+            "design_tool": "CRISPOR或Benchling算法",
+            "efficiency_score": "高（预测>70% indel率）",
+            "off_target_risk": "低（0-1个潜在脱靶位点）",
+            "design_rationale": "靶向功能结构域，避免选择性剪接位点",
+            "references": [
+                {{
+                    "type": "文献",
+                    "title": "Optimized sgRNA design to maximize activity and minimize off-target effects of CRISPR-Cas9",
+                    "authors": "Doench et al.",
+                    "year": "2016",
+                    "source": "Nature Biotechnology",
+                    "pmid_or_patent": "PMID:26780180",
+                    "url": "https://pubmed.ncbi.nlm.nih.gov/26780180/"
+                }}
+            ]
+        }}
+    ],
+    "lentivirus_vector": {{
+        "backbone": "lentiCRISPRv2或pLentiGuide-Puro",
+        "promoter": "U6",
+        "selection": "Puromycin或GFP",
+        "cloning_strategy": "BsmBI酶切，粘性末端连接"
+    }},
+    "notes": "建议使用T7E1或Sanger测序验证切割效率；推荐设计非靶向对照sgRNA（NTC）",
+    "validation_method": "T7E1酶切法或NGS测序检测indels，推荐在转导后72-96小时收集细胞检测"
+}}
+
+要求：
+1. 序列必须符合SpCas9的NGG PAM要求
+2. 优先选择靶向编码区外显子（特别是早期外显子或功能结构域）的序列
+3. 参考文献必须是真实存在的（如Doench 2016、Sanjana 2014等CRISPR经典文献）
+4. 提供具体的慢病毒载体构建建议"""
+
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                'model': 'qwen-turbo',
+                'input': {
+                    'messages': [
+                        {'role': 'system', 'content': '你是CRISPR-Cas9基因编辑专家，精通sgRNA序列设计和慢病毒递送系统，熟悉相关领域的经典文献和专利。'},
+                        {'role': 'user', 'content': prompt}
+                    ]
+                },
+                'parameters': {
+                    'result_format': 'message',
+                    'max_tokens': 2000,
+                    'temperature': 0.2
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result.get('output', {}).get('choices', [{}])[0].get('message', '').get('content', '')
+            
+            try:
+                content_clean = content.replace('```json', '').replace('```', '').strip()
+                design_data = json.loads(content_clean)
+                return design_data
+            except json.JSONDecodeError:
+                logger.error(f"AI CRISPR设计返回非JSON格式: {content}")
+                return {
+                    'error': 'AI返回格式异常',
+                    'sgrnas': [],
+                    'raw_response': content[:500]
+                }
+                
+        except Exception as e:
+            logger.error(f"AI CRISPR设计失败: {e}")
+            return {'error': str(e), 'sgrnas': []}
 
 # ==================== 核心数据库（第一层） ====================
 class CoreDatabases:
@@ -582,6 +1002,84 @@ class NCBIClient:
             logger.error(f"Transcript fetch error: {e}")
             return []
     
+    def search_gene_function_literature(self, gene_name: str, query_type: str) -> List[Dict]:
+        """检索基因功能的特定类型文献"""
+        query_map = {
+            'general': [
+                f"{gene_name} function protein characterization",
+                f"{gene_name} biological role pathway"
+            ],
+            'overexpression': [
+                f"{gene_name} overexpression cell line phenotype",
+                f"{gene_name} ectopic expression tumor",
+                f"{gene_name} transgenic mouse model"
+            ],
+            'knockdown': [
+                f"{gene_name} siRNA knockdown phenotype",
+                f"{gene_name} shRNA silencing effect"
+            ],
+            'knockout': [
+                f"{gene_name} knockout mouse phenotype",
+                f"{gene_name} CRISPR knockout cell",
+                f"{gene_name} gene deletion embryonic lethal"
+            ]
+        }
+        
+        queries = query_map.get(query_type, [f"{gene_name}"])
+        all_papers = []
+        seen_pmids = set()
+        
+        for query in queries:
+            try:
+                search_params = {
+                    'db': 'pubmed',
+                    'term': query,
+                    'retmode': 'json',
+                    'retmax': 8,
+                    'sort': 'relevance'
+                }
+                result = self._make_request('esearch.fcgi', search_params)
+                if not result:
+                    continue
+                
+                pmids = result.get('esearchresult', {}).get('idlist', [])
+                new_pmids = [p for p in pmids if p not in seen_pmids]
+                
+                if not new_pmids:
+                    continue
+                
+                fetch_params = {'db': 'pubmed', 'id': ','.join(new_pmids), 'retmode': 'json'}
+                result = self._make_request('esummary.fcgi', fetch_params)
+                if not result:
+                    continue
+                
+                docs = result.get('result', {})
+                for pmid in new_pmids:
+                    try:
+                        doc = docs.get(pmid, {})
+                        title = doc.get('title', '')
+                        abstract = doc.get('abstract', '') or doc.get('sorttitle', '')
+                        if not title:
+                            continue
+                        
+                        all_papers.append({
+                            'pmid': str(pmid),
+                            'title': html.escape(str(title)[:300]),
+                            'abstract': html.escape(str(abstract)[:800]) if abstract else "[无摘要]",
+                            'authors': doc.get('authors', []),
+                            'source': doc.get('source', ''),
+                            'pubdate': doc.get('pubdate', '')[:4] if doc.get('pubdate') else '',
+                            'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                        })
+                        seen_pmids.add(pmid)
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.error(f"Literature search error: {e}")
+                continue
+        
+        return all_papers
+    
     def search_gene_property_literature(self, gene_name: str, property_type: str) -> List[Dict]:
         """检索基因特定属性的文献 - 增强版（修复抗病毒检索）"""
         # 扩展检索策略：多层级覆盖直接和间接机制
@@ -754,60 +1252,6 @@ class NCBIClient:
             return studies
         except Exception as e:
             logger.error(f"Same cell/gene search error: {e}")
-            return []
-    
-    def search_sirna_sequences(self, gene_name: str) -> List[Dict]:
-        """检索siRNA/shRNA序列"""
-        sequences = []
-        try:
-            queries = [f"{gene_name} siRNA sequence targeting", f"{gene_name} shRNA lentiviral"]
-            for query in queries:
-                search_params = {
-                    'db': 'pubmed',
-                    'term': query,
-                    'retmode': 'json',
-                    'retmax': 5
-                }
-                result = self._make_request('esearch.fcgi', search_params)
-                if result:
-                    pmids = result.get('esearchresult', {}).get('idlist', [])
-                    for pmid in pmids:
-                        sequences.append({
-                            'pmid': pmid,
-                            'type': 'siRNA/shRNA',
-                            'note': '文献报道了序列设计，需查阅全文获取具体序列',
-                            'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-                        })
-            return sequences if sequences else []
-        except Exception as e:
-            logger.error(f"siRNA search error: {e}")
-            return []
-    
-    def search_sgrna_sequences(self, gene_name: str) -> List[Dict]:
-        """检索sgRNA序列"""
-        sequences = []
-        try:
-            queries = [f"{gene_name} CRISPR guide RNA sequence", f"{gene_name} sgRNA lentiviral"]
-            for query in queries:
-                search_params = {
-                    'db': 'pubmed',
-                    'term': query,
-                    'retmode': 'json',
-                    'retmax': 5
-                }
-                result = self._make_request('esearch.fcgi', search_params)
-                if result:
-                    pmids = result.get('esearchresult', {}).get('idlist', [])
-                    for pmid in pmids:
-                        sequences.append({
-                            'pmid': pmid,
-                            'type': 'sgRNA',
-                            'note': '文献报道了sgRNA设计，需查阅全文获取具体序列',
-                            'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-                        })
-            return sequences if sequences else []
-        except Exception as e:
-            logger.error(f"sgRNA search error: {e}")
             return []
 
 # ==================== 数据模型 ====================
@@ -1420,6 +1864,36 @@ class HybridAssessmentEngine:
             result['blocking_evidence'] = [asdict(c) for c in blocking]
             return result
         
+        # 基因功能全面分析（新增模块）
+        if self.ai and self.ai.api_key:
+            with st.spinner("📚 AI正在分析基因功能及实验模型数据..."):
+                # 检索不同类型的文献
+                papers_general = self.ncbi.search_gene_function_literature(gene_name, 'general')
+                papers_oe = self.ncbi.search_gene_function_literature(gene_name, 'overexpression')
+                papers_kd = self.ncbi.search_gene_function_literature(gene_name, 'knockdown')
+                papers_ko = self.ncbi.search_gene_function_literature(gene_name, 'knockout')
+                
+                # AI综合分析
+                function_analysis = self.ai.analyze_gene_function_comprehensive(
+                    gene_name=gene_name,
+                    gene_description=gene_info.get('description', ''),
+                    papers_oe=papers_oe,
+                    papers_kd=papers_kd,
+                    papers_ko=papers_ko,
+                    papers_general=papers_general
+                )
+                
+                result['gene_function_analysis'] = {
+                    'data': function_analysis,
+                    'literature_counts': {
+                        'general': len(papers_general),
+                        'overexpression': len(papers_oe),
+                        'knockdown': len(papers_kd),
+                        'knockout': len(papers_ko)
+                    },
+                    'source': 'AI基于文献综合分析'
+                }
+        
         # HPA表达数据（仅Human + 输入细胞名）
         if organism == 'Homo sapiens' and cell_line:
             with st.spinner("🧬 查询HPA表达数据..."):
@@ -1442,21 +1916,51 @@ class HybridAssessmentEngine:
                     'same_cell_gene_studies': same_cell_studies if same_cell_studies else '无同细胞同基因研究报道'
                 }
         
-        # 序列设计检索（敲低/敲除）
+        # 序列设计检索（敲低/敲除）- 使用AI直接设计
         if experiment_type.lower() in ['knockdown', 'knockout']:
-            with st.spinner("🎯 检索序列设计..."):
-                if experiment_type.lower() == 'knockdown':
-                    sequences = self.ncbi.search_sirna_sequences(gene_name)
-                    result['sequence_designs'] = {
-                        'type': 'siRNA/shRNA',
-                        'designs': sequences if sequences else '无已报道的设计'
-                    }
-                else:
-                    sequences = self.ncbi.search_sgrna_sequences(gene_name)
-                    result['sequence_designs'] = {
-                        'type': 'sgRNA',
-                        'designs': sequences if sequences else '无已报道的设计'
-                    }
+            if self.ai and self.ai.api_key:
+                with st.spinner("🧬 AI正在设计序列并提供参考文献..."):
+                    if experiment_type.lower() == 'knockdown':
+                        # AI设计siRNA/shRNA
+                        design_data = self.ai.design_rnai_sequences(
+                            gene_name=gene_name,
+                            gene_id=gene_info.get('id', ''),
+                            gene_description=gene_info.get('description', '')
+                        )
+                        result['sequence_designs'] = {
+                            'type': 'siRNA/shRNA (AI设计)',
+                            'designs': design_data,
+                            'source': 'AI基于最新文献和数据库知识设计'
+                        }
+                    else:
+                        # AI设计sgRNA
+                        design_data = self.ai.design_crispr_sequences(
+                            gene_name=gene_name,
+                            gene_id=gene_info.get('id', ''),
+                            gene_description=gene_info.get('description', '')
+                        )
+                        result['sequence_designs'] = {
+                            'type': 'sgRNA (AI设计)',
+                            'designs': design_data,
+                            'source': 'AI基于最新文献和数据库知识设计'
+                        }
+            else:
+                # 未配置AI时回退到文献检索
+                with st.spinner("🎯 检索序列设计文献（未配置AI，使用文献检索）..."):
+                    if experiment_type.lower() == 'knockdown':
+                        sequences = self.ncbi.search_sirna_sequences(gene_name)
+                        result['sequence_designs'] = {
+                            'type': 'siRNA/shRNA',
+                            'designs': sequences if sequences else '无已报道的设计',
+                            'source': 'PubMed文献检索'
+                        }
+                    else:
+                        sequences = self.ncbi.search_sgrna_sequences(gene_name)
+                        result['sequence_designs'] = {
+                            'type': 'sgRNA',
+                            'designs': sequences if sequences else '无已报道的设计',
+                            'source': 'PubMed文献检索'
+                        }
         
         # 生成建议
         warning_checks = [c for c in hard_checks if not c.passed and c.overrideable]
@@ -1489,13 +1993,13 @@ def render_sidebar():
         st.divider()
         st.subheader("AI配置（可选）")
         qwen_key = st.text_input("通义千问API Key", type="password", key="qwen_key_input", 
-                                help="可选，用于AI文献语义分析（增强抗病毒检测）")
+                                help="可选，用于AI文献语义分析（增强抗病毒检测）和序列设计")
         
         final_qwen = APIConfig.get_qwen_api_key()
         if final_qwen:
-            st.success("✅ AI API已配置 - 将启用语义分析")
+            st.success("✅ AI API已配置 - 将启用语义分析和智能序列设计")
         else:
-            st.info("ℹ️ 未配置AI（将使用关键词匹配）")
+            st.info("ℹ️ 未配置AI（将使用关键词匹配和传统文献检索）")
         
         st.divider()
         st.caption("🔒 核心列表+文献补充+AI语义分析混合策略")
@@ -1586,8 +2090,8 @@ def render_results(result: Dict):
     </div>
     """, unsafe_allow_html=True)
     
-    # 标签页
-    tabs = st.tabs(["硬性规则检查", "HPA表达数据", "细胞评估", "序列设计"])
+    # 标签页 - 新增"基因功能分析"
+    tabs = st.tabs(["硬性规则检查", "基因功能分析", "HPA表达数据", "细胞评估", "序列设计"])
     
     with tabs[0]:
         st.markdown("### 🚦 混合硬性规则检查（核心数据库+文献补充+AI语义分析）")
@@ -1648,7 +2152,140 @@ def render_results(result: Dict):
             </div>
             """, unsafe_allow_html=True)
     
+    # 新增：基因功能分析标签页
     with tabs[1]:
+        st.markdown("### 📖 基因功能全面分析（基于AI文献综合）")
+        
+        func_analysis = result.get('gene_function_analysis', {})
+        if func_analysis and not func_analysis.get('data', {}).get('error'):
+            data = func_analysis.get('data', {})
+            lit_counts = func_analysis.get('literature_counts', {})
+            
+            # 文献统计
+            st.markdown("#### 📊 文献覆盖统计")
+            cols = st.columns(4)
+            cols[0].metric("基因功能文献", lit_counts.get('general', 0))
+            cols[1].metric("过表达研究", lit_counts.get('overexpression', 0))
+            cols[2].metric("敲低研究", lit_counts.get('knockdown', 0))
+            cols[3].metric("敲除研究", lit_counts.get('knockout', 0))
+            st.caption(f"来源: {func_analysis.get('source', 'AI分析')}")
+            st.divider()
+            
+            # 蛋白基础功能
+            if 'protein_function' in data:
+                with st.expander("🧬 蛋白基础功能", expanded=True):
+                    pf = data['protein_function']
+                    st.write(f"**蛋白类别**: {pf.get('category', 'N/A')}")
+                    st.write(f"**结构域**: {pf.get('domains', 'N/A')}")
+                    st.write(f"**信号通路**: {pf.get('pathways', 'N/A')}")
+                    st.write(f"**亚细胞定位**: {pf.get('cellular_location', 'N/A')}")
+                    st.write(f"**组织表达**: {pf.get('tissue_expression', 'N/A')}")
+            
+            # 过表达效应
+            if 'overexpression' in data:
+                with st.expander("⬆️ 过表达效应（Gain-of-function）"):
+                    oe = data['overexpression']
+                    if 'cell_models' in oe and oe['cell_models']:
+                        st.markdown("**细胞模型:**")
+                        for model in oe['cell_models']:
+                            with st.container():
+                                st.markdown(f"""
+                                - **细胞系**: {model.get('cell_line', 'N/A')}  
+                                  **表型**: {model.get('phenotype', 'N/A')}  
+                                  **机制**: {model.get('mechanism', 'N/A')}  
+                                  **文献**: {model.get('reference', 'N/A')}
+                                """)
+                    else:
+                        st.info("未见细胞水平过表达报道")
+                    
+                    if 'animal_models' in oe and oe['animal_models']:
+                        st.markdown("**动物模型:**")
+                        for model in oe['animal_models']:
+                            st.markdown(f"""
+                            - **模型**: {model.get('model', 'N/A')}  
+                              **表型**: {model.get('phenotype', 'N/A')}  
+                              **文献**: {model.get('reference', 'N/A')}
+                            """)
+                    else:
+                        st.info("未见动物模型过表达报道")
+                    
+                    if 'summary' in oe:
+                        st.success(f"**总结**: {oe['summary']}")
+            
+            # 敲低效应
+            if 'knockdown' in data:
+                with st.expander("⬇️ 敲低效应（RNAi）"):
+                    kd = data['knockdown']
+                    if 'cell_models' in kd and kd['cell_models']:
+                        st.markdown("**细胞模型:**")
+                        for model in kd['cell_models']:
+                            st.markdown(f"""
+                            - **细胞系**: {model.get('cell_line', 'N/A')}  
+                              **方法**: {model.get('method', 'N/A')}  
+                              **表型**: {model.get('phenotype', 'N/A')}  
+                              **文献**: {model.get('reference', 'N/A')}
+                            """)
+                    else:
+                        st.info("未见敲低报道")
+                    
+                    if 'summary' in kd:
+                        st.success(f"**总结**: {kd['summary']}")
+            
+            # 敲除效应
+            if 'knockout' in data:
+                with st.expander("🚫 敲除效应（Knockout）"):
+                    ko = data['knockout']
+                    
+                    if 'cell_models' in ko and ko['cell_models']:
+                        st.markdown("**细胞模型:**")
+                        for model in ko['cell_models']:
+                            st.markdown(f"""
+                            - **细胞系**: {model.get('cell_line', 'N/A')}  
+                              **方法**: {model.get('method', 'N/A')}  
+                              **表型**: {model.get('phenotype', 'N/A')}  
+                              **细胞活力影响**: {model.get('viability', 'N/A')}  
+                              **文献**: {model.get('reference', 'N/A')}
+                            """)
+                    else:
+                        st.info("未见细胞敲除报道")
+                    
+                    if 'animal_models' in ko and ko['animal_models']:
+                        st.markdown("**动物模型:**")
+                        for model in ko['animal_models']:
+                            st.markdown(f"""
+                            - **模型**: {model.get('model', 'N/A')}  
+                              **表型**: {model.get('phenotype', 'N/A')}  
+                              **致死性**: {model.get('lethality', 'N/A')}  
+                              **文献**: {model.get('reference', 'N/A')}
+                            """)
+                    else:
+                        st.info("未见动物敲除报道")
+                    
+                    if 'summary' in ko:
+                        st.success(f"**总结**: {ko['summary']}")
+            
+            # 疾病相关性
+            if 'disease_relevance' in data:
+                with st.expander("🏥 疾病相关性"):
+                    dr = data['disease_relevance']
+                    st.write(f"**肿瘤作用**: {dr.get('cancer', 'N/A')}")
+                    st.write(f"**其他疾病**: {dr.get('other_diseases', 'N/A')}")
+                    st.write(f"**治疗潜力**: {dr.get('therapeutic_potential', 'N/A')}")
+            
+            # 实验注意事项
+            if 'experimental_notes' in data:
+                st.warning(f"⚠️ **实验设计注意事项**: {data['experimental_notes']}")
+            
+            # 关键文献
+            if 'key_references' in data:
+                with st.expander("📚 关键参考文献"):
+                    for ref in data['key_references']:
+                        st.markdown(f"- {ref}")
+        
+        else:
+            st.info("⚠️ 未配置AI API或未获取到功能分析数据。请在侧边栏配置通义千问API Key以启用此功能。")
+    
+    with tabs[2]:
         st.markdown("### 🧬 HPA表达量数据")
         hpa_data = result.get('hpa_data')
         if hpa_data:
@@ -1667,7 +2304,7 @@ def render_results(result: Dict):
         else:
             st.info("⚠️ 仅当物种为人类且输入细胞名时显示HPA数据")
     
-    with tabs[2]:
+    with tabs[3]:
         st.markdown("### 🧫 细胞系构建评估数据")
         cell_data = result.get('cell_assessment')
         if cell_data:
@@ -1701,21 +2338,118 @@ def render_results(result: Dict):
         else:
             st.info("⚠️ 输入细胞名以获取细胞评估数据")
     
-    with tabs[3]:
+    with tabs[4]:
         st.markdown("### 🎯 序列设计参考")
         seq_data = result.get('sequence_designs')
         if seq_data:
-            st.subheader(f"{seq_data.get('type', '')} 设计")
-            designs = seq_data.get('designs')
-            if designs and designs != '无已报道的设计':
-                for design in designs[:5]:
-                    st.markdown(f"""
-                    - **类型**: {design.get('type', '')}  
-                      **说明**: {design.get('note', '')}  
-                      [查看文献 (PMID: {design.get('pmid', '')})]({design.get('url', '')})
-                    """)
+            st.subheader(f"{seq_data.get('type', '')}")
+            
+            # 显示数据来源
+            source_info = seq_data.get('source', '')
+            if 'AI' in source_info:
+                st.success(f"🤖 {source_info}")
             else:
-                st.warning("无已报道的设计")
+                st.info(f"📚 {source_info}")
+            
+            designs = seq_data.get('designs', {})
+            
+            # 处理AI设计的序列
+            if isinstance(designs, dict) and not designs.get('error'):
+                if 'sequences' in designs:
+                    # siRNA设计展示
+                    for i, seq in enumerate(designs.get('sequences', [])):
+                        with st.expander(f"候选序列 #{i+1}: {seq.get('target_seq', 'N/A')}"):
+                            st.write(f"**靶序列**: `{seq.get('target_seq', 'N/A')}`")
+                            st.write(f"**靶向区域**: {seq.get('target_region', 'N/A')}")
+                            st.write(f"**设计原理**: {seq.get('design_rationale', 'N/A')}")
+                            st.write(f"**预期效率**: {seq.get('efficiency_score', 'N/A')}")
+                            
+                            # 显示参考文献
+                            refs = seq.get('references', [])
+                            if refs:
+                                st.write("**参考文献/专利**:")
+                                for ref in refs:
+                                    ref_type = ref.get('type', '文献')
+                                    with st.container():
+                                        col1, col2 = st.columns([3, 1])
+                                        with col1:
+                                            st.markdown(f"*{html.escape(ref.get('title', ''))}*  \n"
+                                                      f"{html.escape(ref.get('authors', ''))} ({ref.get('year', '')})  \n"
+                                                      f"*{html.escape(ref.get('source', ''))}*")
+                                        with col2:
+                                            pmid = ref.get('pmid_or_patent', '')
+                                            url = ref.get('url', '')
+                                            if url:
+                                                st.markdown(f"[{pmid}]({url})")
+                                            else:
+                                                st.text(pmid)
+                
+                elif 'sgrnas' in designs:
+                    # sgRNA设计展示
+                    for i, sgrna in enumerate(designs.get('sgrnas', [])):
+                        with st.expander(f"sgRNA #{i+1}: {sgrna.get('sequence', 'N/A')}"):
+                            st.write(f"**靶序列**: `{sgrna.get('sequence', 'N/A')}`")
+                            st.write(f"**PAM**: {sgrna.get('pam', 'NGG')}")
+                            st.write(f"**靶向外显子**: {sgrna.get('target_exon', 'N/A')}")
+                            st.write(f"**切割位点**: {sgrna.get('cut_site', 'N/A')}")
+                            st.write(f"**预测效率**: {sgrna.get('efficiency_score', 'N/A')}")
+                            st.write(f"**脱靶风险**: {sgrna.get('off_target_risk', 'N/A')}")
+                            st.write(f"**设计依据**: {sgrna.get('design_rationale', 'N/A')}")
+                            
+                            # 显示参考文献
+                            refs = sgrna.get('references', [])
+                            if refs:
+                                st.write("**参考文献/专利**:")
+                                for ref in refs:
+                                    ref_type = ref.get('type', '文献')
+                                    with st.container():
+                                        col1, col2 = st.columns([3, 1])
+                                        with col1:
+                                            st.markdown(f"*{html.escape(ref.get('title', ''))}*  \n"
+                                                      f"{html.escape(ref.get('authors', ''))} ({ref.get('year', '')})  \n"
+                                                      f"*{html.escape(ref.get('source', ''))}*")
+                                        with col2:
+                                            pmid = ref.get('pmid_or_patent', '')
+                                            url = ref.get('url', '')
+                                            if url:
+                                                st.markdown(f"[{pmid}]({url})")
+                                            else:
+                                                st.text(pmid)
+                
+                # 显示载体设计建议
+                if 'shrna_vector_design' in designs:
+                    vec = designs['shrna_vector_design']
+                    st.divider()
+                    st.subheader("🧬 shRNA载体设计建议")
+                    st.json(vec)
+                
+                if 'lentivirus_vector' in designs:
+                    vec = designs['lentivirus_vector']
+                    st.divider()
+                    st.subheader("🧬 慢病毒载体建议")
+                    st.json(vec)
+                
+                # 显示通用注意事项
+                if 'notes' in designs:
+                    st.info(f"💡 **注意事项**: {designs['notes']}")
+                
+                if 'validation_method' in designs:
+                    st.success(f"✅ **验证建议**: {designs['validation_method']}")
+            
+            # 处理传统文献检索结果
+            elif isinstance(designs, list):
+                if designs and designs != '无已报道的设计':
+                    for design in designs[:5]:
+                        st.markdown(f"""
+                        - **类型**: {design.get('type', '')}  
+                          **说明**: {design.get('note', '')}  
+                          [查看文献 (PMID: {design.get('pmid', '')})]({design.get('url', '')})
+                        """)
+                else:
+                    st.warning("无已报道的设计")
+            
+            else:
+                st.error("序列设计数据格式异常")
         else:
             st.info("⚠️ 敲低和敲除实验可查看序列设计建议")
 
