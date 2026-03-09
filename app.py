@@ -905,7 +905,8 @@ class HybridHardRulesEngine:
             # 检查核心抗病毒
             core_antiviral = CoreDatabases.check_gene(gene_name, 'antiviral')
             if core_antiviral:
-                pmid, source, desc = core_result
+                # 修复：使用 core_antiviral 而不是 core_result
+                pmid, source, desc = core_antiviral
                 check = HardRuleCheck(
                     rule_name="抗病毒基因检查（核心数据库）",
                     passed=False,
@@ -925,7 +926,7 @@ class HybridHardRulesEngine:
                 if not lit_check.passed:
                     evidence_summary['antiviral_checked'] = True
                     evidence_summary['literature_hits'].append('antiviral')
-                if hasattr(self, 'ai') and self.ai and self.ai.api_key:
+                if self.ai and self.ai.api_key:
                     evidence_summary['ai_analyzed'] = True
         
         return all(c.passed for c in checks), checks, evidence_summary
@@ -1782,7 +1783,7 @@ def main():
             
         except Exception as e:
             logger.exception(f"Unhandled error: {e}")
-            st.error(f"❌ 系统错误，请联系管理员")
+            st.error(f"❌ 系统错误: {str(e)}")  # 显示具体错误信息便于调试
 
 if __name__ == "__main__":
     main()
