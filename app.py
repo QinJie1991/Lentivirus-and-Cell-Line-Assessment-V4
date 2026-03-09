@@ -34,6 +34,110 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ==================== AI分析客户端 ====================
+class AIAnalysisClient:
+    """通义千问API客户端 - 用于文献语义分析"""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key
+        self.base_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    
+    def analyze_antiviral_evidence(self, gene_name: str, title: str, abstract: str) -> Dict:
+        """
+        使用AI分析文献是否包含抗病毒功能证据
+        返回: {
+            'is_antiviral': bool,
+            'confidence': float,  # 0-1
+            'mechanism': str,     # 机制描述
+            'reasoning': str      # 推理过程
+        }
+        """
+        if not self.api_key:
+            return {'is_antiviral': False, 'confidence': 0, 'mechanism': '', 'reasoning': '未配置API'}
+        
+        try:
+            prompt = f"""请分析以下文献，判断其是否报道了基因"{gene_name}"具有抗病毒功能。
+            
+文献标题：{title}
+文献摘要：{abstract}
+
+请按以下JSON格式回答（只返回JSON，不要有其他文字）：
+{{
+    "is_antiviral": true/false,
+    "confidence": 0.0-1.0,
+    "mechanism": "具体的抗病毒机制，如：调控IFITM家族、影响鞘脂代谢、激活干扰素通路等",
+    "reasoning": "简要说明判断依据"
+}}
+
+注意：
+1. is_antiviral：只要文献提到该基因能抑制病毒复制、增强抗病毒免疫、调控抗病毒基因表达等，即为true
+2. confidence：证据越明确、机制越清晰，置信度越高
+3. 即使不是经典的ISG基因，只要提到能影响病毒感染或复制，也算有抗病毒功能"""
+
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                'model': 'qwen-turbo',
+                'input': {
+                    'messages': [
+                        {'role': 'system', 'content': '你是一个专业的生物医学文献分析助手，擅长从文献中提取基因的抗病毒功能证据。'},
+                        {'role': 'user', 'content': prompt}
+                    ]
+                },
+                'parameters': {
+                    'result_format': 'message',
+                    'max_tokens': 500,
+                    'temperature': 0.1
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
+            
+            # 解析JSON响应
+            try:
+                # 清理可能的Markdown代码块标记
+                content_clean = content.replace('```json', '').replace('```', '').strip()
+                analysis = json.loads(content_clean)
+                
+                return {
+                    'is_antiviral': analysis.get('is_antiviral', False),
+                    'confidence': float(analysis.get('confidence', 0)),
+                    'mechanism': analysis.get('mechanism', ''),
+                    'reasoning': analysis.get('reasoning', '')
+                }
+            except json.JSONDecodeError:
+                logger.warning(f"AI返回非JSON格式: {content}")
+                # 简单关键词回退
+                is_antiviral = any(kw in (title + abstract).lower() for kw in 
+                                  ['antiviral', 'virus', 'interferon', 'ifitm', 'innate immunity'])
+                return {
+                    'is_antiviral': is_antiviral,
+                    'confidence': 0.5 if is_antiviral else 0,
+                    'mechanism': 'AI解析失败，使用关键词匹配',
+                    'reasoning': 'API返回格式异常，降级处理'
+                }
+                
+        except Exception as e:
+            logger.error(f"AI分析失败: {e}")
+            return {
+                'is_antiviral': False,
+                'confidence': 0,
+                'mechanism': '',
+                'reasoning': f'API调用失败: {str(e)}'
+            }
+
 # ==================== 核心数据库（第一层） ====================
 class CoreDatabases:
     """
@@ -95,6 +199,7 @@ class CoreDatabases:
         'TRIM5': ('PMID:15890885', '限制因子', '限制HIV-1等逆转录病毒复制'),
         'APOBEC3G': ('PMID:12134021', '限制因子', '胞嘧啶脱氨酶抑制HIV-1（Vif靶向）'),
         'BST2': ('PMID:19543227', '限制因子', 'Tetherin限制病毒出芽'),
+        'KLF5': ('PMID:33597534', '转录因子-间接抗病毒', '调控IFITM家族和鞘脂代谢抑制SARS-CoV-2等病毒复制'),
     }
     
     @classmethod
@@ -478,7 +583,8 @@ class NCBIClient:
             return []
     
     def search_gene_property_literature(self, gene_name: str, property_type: str) -> List[Dict]:
-        """检索基因特定属性的文献"""
+        """检索基因特定属性的文献 - 增强版（修复抗病毒检索）"""
+        # 扩展检索策略：多层级覆盖直接和间接机制
         query_map = {
             'essential': [
                 f"{gene_name} knockout lethal",
@@ -490,10 +596,30 @@ class NCBIClient:
                 f"{gene_name} overexpression apoptosis cell death",
                 f"{gene_name} overexpression growth inhibition"
             ],
+            # 抗病毒检索策略：4层级全面覆盖
             'antiviral': [
+                # 层级1：经典ISG/干扰素通路（原有）
                 f"{gene_name} interferon antiviral innate immunity",
-                f"{gene_name} virus replication restriction factor",
-                f"{gene_name} ISG interferon stimulated"
+                f"{gene_name} virus replication restriction factor", 
+                f"{gene_name} ISG interferon stimulated",
+                
+                # 层级2：间接抗病毒机制（转录因子、宿主因子）
+                f"{gene_name} IFITM antiviral",  # KLF5调控IFITM家族
+                f"{gene_name} transcription factor antiviral gene",
+                f"{gene_name} regulates interferon stimulated gene",
+                f"{gene_name} host factor virus infection",
+                
+                # 层级3：具体通路和病毒（扩大覆盖）
+                f"{gene_name} STING MDA5 RIG-I pathway",
+                f"{gene_name} influenza HIV SARS-CoV-2",
+                f"{gene_name} virus susceptibility resistance",
+                f"{gene_name} viral infection immune response",
+                
+                # 层级4：广义抗病毒相关（兜底）
+                f"{gene_name} antiviral defense mechanism",
+                f"{gene_name} innate immunity virus",
+                f"{gene_name} infection response",
+                f"{gene_name} virus entry replication"
             ]
         }
         
@@ -538,7 +664,7 @@ class NCBIClient:
                             'pmid': str(pmid),
                             'title': html.escape(str(title)[:300]),
                             'abstract': html.escape(str(abstract)[:800]) if abstract else "[无摘要]",
-                            'query': query,
+                            'query': query,  # 记录来源查询词
                             'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
                         })
                         seen_pmids.add(pmid)
@@ -702,11 +828,12 @@ class HybridHardRulesEngine:
     """
     混合架构：
     第一层：核心数据库（DepMap + 经典文献，高置信度，瞬时响应）
-    第二层：文献补充（PubMed检索，发现新证据，动态更新）
+    第二层：文献补充（PubMed检索 + AI语义分析，发现新证据，动态更新）
     """
     
-    def __init__(self, ncbi_client: NCBIClient):
+    def __init__(self, ncbi_client: NCBIClient, ai_client: Optional[AIAnalysisClient] = None):
         self.ncbi = ncbi_client
+        self.ai = ai_client
     
     def check_all(self, gene_name: str, transcripts: List[Dict], 
                   experiment_type: str) -> Tuple[bool, List[HardRuleCheck], Dict]:
@@ -717,7 +844,8 @@ class HybridHardRulesEngine:
             'toxic_checked': False,
             'antiviral_checked': False,
             'core_hits': [],
-            'literature_hits': []
+            'literature_hits': [],
+            'ai_analyzed': False
         }
         
         # 1. 载体容量检查（仅过表达）
@@ -777,7 +905,7 @@ class HybridHardRulesEngine:
             # 检查核心抗病毒
             core_antiviral = CoreDatabases.check_gene(gene_name, 'antiviral')
             if core_antiviral:
-                pmid, source, desc = core_antiviral
+                pmid, source, desc = core_result
                 check = HardRuleCheck(
                     rule_name="抗病毒基因检查（核心数据库）",
                     passed=False,
@@ -791,11 +919,14 @@ class HybridHardRulesEngine:
                 evidence_summary['antiviral_checked'] = True
                 evidence_summary['core_hits'].append('antiviral')
             else:
-                lit_check = self._check_by_literature(gene_name, 'antiviral')
+                # 使用增强版文献检查（含AI分析）
+                lit_check = self._check_by_literature_enhanced(gene_name, 'antiviral')
                 checks.append(lit_check)
                 if not lit_check.passed:
                     evidence_summary['antiviral_checked'] = True
                     evidence_summary['literature_hits'].append('antiviral')
+                if hasattr(self, 'ai') and self.ai and self.ai.api_key:
+                    evidence_summary['ai_analyzed'] = True
         
         return all(c.passed for c in checks), checks, evidence_summary
     
@@ -836,7 +967,7 @@ class HybridHardRulesEngine:
             )
     
     def _check_by_literature(self, gene_name: str, check_type: str) -> HardRuleCheck:
-        """文献补充检查"""
+        """文献补充检查 - 基础版（非抗病毒检查使用）"""
         papers = self.ncbi.search_gene_property_literature(gene_name, check_type)
         
         if not papers:
@@ -850,29 +981,114 @@ class HybridHardRulesEngine:
                 check_level="literature"
             )
         
-        # 基于文献原文的严格匹配
-        evidence = []
-        phrases = {
-            'essential': ['lethal knockout', 'knockout is lethal', 'essential for survival', 'required for viability'],
-            'toxic': ['overexpression induced cell death', 'overexpression is cytotoxic', 'overexpression triggers apoptosis'],
-            'antiviral': ['inhibits viral replication', 'antiviral activity', 'restricts virus', 'isg15', 'mx1', 'interferon stimulated']
-        }
-        
-        target_phrases = phrases.get(check_type, [])
-        
-        for paper in papers:
-            text = (paper.get('abstract', '') + ' ' + paper.get('title', '')).lower()
-            if any(phrase in text for phrase in target_phrases):
-                evidence.append(paper)
-        
+        # 基于文献原文的智能匹配（区分不同检查类型）
         type_names = {'essential': '必需性', 'toxic': '毒性', 'antiviral': '抗病毒功能'}
+        
+        if check_type == 'antiviral':
+            # 抗病毒检查：扩展关键词库 + 模糊匹配 + 评分机制
+            antiviral_keywords = {
+                'high_confidence': [
+                    'inhibit virus', 'inhibit viral', 'antiviral', 'anti-viral', 
+                    'restrict virus', 'viral restriction', 'virus restriction', 
+                    'resist virus', 'viral resistance', 'host restriction'
+                ],
+                'immune_pathway': [
+                    'innate immunity', 'interferon', 'ifn', 'isg', 'type i interferon',
+                    'immune response', 'immune defense', 'pathogen associated', 
+                    'pattern recognition', 'prr', 'tlr', 'rig-i', 'mda5', 'sting',
+                    'ifitm', 'isg15', 'isg56', ' innate immune '
+                ],
+                'virus_specific': [
+                    'influenza', 'hiv', 'sars-cov', 'coronavirus', 'herpes', 
+                    'hepatitis', 'vesicular stomatitis', 'vsv', ' EMCV '
+                ],
+                'mechanism': [
+                    'host factor', 'susceptibility', 'resistance to infection', 
+                    'viral replication', 'virus entry', 'virus assembly', 
+                    'virus budding', 'interferon stimulated'
+                ],
+                'transcription_regulation': [
+                    'transcription factor', 'regulates expression', 'promoter activity',
+                    'gene regulation', 'upregulates', 'downregulates', 'induces expression'
+                ]
+            }
+            
+            # 扁平化所有关键词用于匹配
+            all_keywords = []
+            for category, words in antiviral_keywords.items():
+                all_keywords.extend(words)
+            
+            evidence = []
+            for paper in papers:
+                text = (paper.get('abstract', '') + ' ' + paper.get('title', '')).lower()
+                
+                # 计算匹配得分
+                match_score = 0
+                matched_terms = []
+                
+                for term in all_keywords:
+                    if term in text:
+                        match_score += 1
+                        matched_terms.append(term)
+                
+                # 特殊加分：标题中出现关键词
+                title_lower = paper.get('title', '').lower()
+                if any(term in title_lower for term in ['antiviral', 'virus', 'interferon', 'innate immunity']):
+                    match_score += 2
+                
+                # 判定标准：匹配分>=3 或 明确包含病毒名称+免疫相关词
+                if match_score >= 3:
+                    evidence.append({
+                        **paper, 
+                        'match_score': match_score,
+                        'matched_terms': matched_terms[:5]  # 记录前5个匹配词
+                    })
+                elif match_score >= 1 and any(v in text for v in ['virus', 'viral', 'infection']):
+                    # 次要标准：只要有病毒相关词且至少有1个关键词匹配
+                    evidence.append({
+                        **paper, 
+                        'match_score': match_score,
+                        'matched_terms': matched_terms[:5]
+                    })
+            
+            # 按匹配度排序
+            evidence.sort(key=lambda x: x.get('match_score', 0), reverse=True)
+            
+        else:
+            # 必需性和毒性检查：保留原有的严格匹配逻辑
+            target_phrases = {
+                'essential': [
+                    'lethal knockout', 'knockout is lethal', 'essential for survival', 
+                    'required for viability', 'knockout leads to death', 
+                    'deletion is lethal', 'null mutant lethal'
+                ],
+                'toxic': [
+                    'overexpression induced cell death', 'overexpression is cytotoxic', 
+                    'overexpression triggers apoptosis', 'overexpression lethal',
+                    'overexpression toxic', 'ectopic expression cell death'
+                ]
+            }.get(check_type, [])
+            
+            evidence = []
+            for paper in papers:
+                text = (paper.get('abstract', '') + ' ' + paper.get('title', '')).lower()
+                if any(phrase in text for phrase in target_phrases):
+                    evidence.append(paper)
         
         if evidence:
             pmid_list = [p['pmid'] for p in evidence[:3]]
+            best_match = evidence[0]
+            
+            # 构建详细的匹配说明
+            if check_type == 'antiviral' and 'match_score' in best_match:
+                match_info = f"（匹配度: {best_match['match_score']}/12，关键词: {', '.join(best_match.get('matched_terms', [])[:3])}）"
+            else:
+                match_info = ""
+            
             return HardRuleCheck(
                 rule_name=f"{type_names[check_type]}检查（文献补充）",
                 passed=False,
-                reason=f"❌ 文献检索发现 {gene_name} 具有{type_names[check_type]}证据：{evidence[0]['title'][:80]}...",
+                reason=f"❌ 文献检索发现 {gene_name} 具有{type_names[check_type]}证据：{best_match['title'][:80]}...{match_info}",
                 source=f"PubMed文献检索（{len(evidence)}篇明确证据，核心数据库未收录）",
                 pmid=pmid_list[0],
                 pmid_list=pmid_list,
@@ -881,16 +1097,100 @@ class HybridHardRulesEngine:
                 check_level="literature"
             )
         
+        # 无明确证据但检索到文献的情况
         return HardRuleCheck(
             rule_name=f"{type_names[check_type]}检查（文献补充）",
             passed=True,
-            reason=f"✅ 检索到{len(papers)}篇文献，但未发现明确证据",
+            reason=f"✅ 检索到{len(papers)}篇文献，但未发现明确{type_names[check_type]}证据",
             source="PubMed文献检索（无明确证据）",
             pmid_list=[p['pmid'] for p in papers[:3]],
             evidence_papers=papers[:3],
             overrideable=True,
             check_level="literature"
         )
+    
+    def _check_by_literature_enhanced(self, gene_name: str, check_type: str) -> HardRuleCheck:
+        """文献补充检查 - 增强版（含AI语义分析，仅用于抗病毒检查）"""
+        if check_type != 'antiviral':
+            return self._check_by_literature(gene_name, check_type)
+        
+        papers = self.ncbi.search_gene_property_literature(gene_name, check_type)
+        
+        if not papers:
+            return HardRuleCheck(
+                rule_name="抗病毒基因检查（文献+AI分析）",
+                passed=True,
+                reason=f"✅ 核心数据库未收录，且未检索到相关文献",
+                source="核心数据库+PubMed（零结果）",
+                overrideable=True,
+                check_level="literature"
+            )
+        
+        # 第一步：传统关键词筛选（减少AI调用量）
+        pre_filtered = []
+        for paper in papers[:10]:  # 只分析前10篇最相关的
+            text = (paper.get('abstract', '') + ' ' + paper.get('title', '')).lower()
+            # 宽松预筛：只要提到病毒相关就保留
+            if any(kw in text for kw in ['virus', 'viral', 'infection', 'interferon', 'immunity', 'host']):
+                pre_filtered.append(paper)
+        
+        if not pre_filtered:
+            return HardRuleCheck(
+                rule_name="抗病毒基因检查（文献+AI分析）",
+                passed=True,
+                reason=f"✅ 检索到{len(papers)}篇文献，但预筛选未发现有潜力文献",
+                source="PubMed文献检索（关键词预筛选）",
+                pmid_list=[p['pmid'] for p in papers[:3]],
+                evidence_papers=papers[:3],
+                overrideable=True,
+                check_level="literature"
+            )
+        
+        # 第二步：AI语义分析（如果配置了API）
+        ai_evidence = []
+        if self.ai and self.ai.api_key:
+            with st.spinner(f"🤖 AI正在分析{len(pre_filtered)}篇文献的抗病毒证据..."):
+                for paper in pre_filtered[:3]:  # AI分析前3篇
+                    try:
+                        analysis = self.ai.analyze_antiviral_evidence(
+                            gene_name=gene_name,
+                            title=paper.get('title', ''),
+                            abstract=paper.get('abstract', '')
+                        )
+                        
+                        if analysis.get('is_antiviral') and analysis.get('confidence', 0) > 0.6:
+                            ai_evidence.append({
+                                **paper,
+                                'ai_confidence': analysis.get('confidence'),
+                                'ai_mechanism': analysis.get('mechanism'),
+                                'ai_reasoning': analysis.get('reasoning')
+                            })
+                    except Exception as e:
+                        logger.error(f"AI分析失败: {e}")
+                        continue
+        
+        # 第三步：综合判定
+        if ai_evidence:
+            best = ai_evidence[0]
+            pmid_list = [p['pmid'] for p in ai_evidence[:3]]
+            
+            mechanism = best.get('ai_mechanism', '未知机制')
+            confidence = best.get('ai_confidence', 0)
+            
+            return HardRuleCheck(
+                rule_name="抗病毒基因检查（文献+AI分析）",
+                passed=False,
+                reason=f"❌ AI分析确认 {gene_name} 具有抗病毒功能（置信度: {confidence:.0%}）",
+                source=f"PubMed + 通义千问AI语义分析（机制: {mechanism}）",
+                pmid=best['pmid'],
+                pmid_list=pmid_list,
+                evidence_papers=ai_evidence[:3],
+                overrideable=False,
+                check_level="literature"
+            )
+        
+        # AI未确认，回退到关键词匹配
+        return self._check_by_literature(gene_name, check_type)
 
 # ==================== 基因输入组件 ====================
 class GeneAutocompleteService:
@@ -1067,9 +1367,10 @@ class ReportExporter:
 
 # ==================== 主评估引擎 ====================
 class HybridAssessmentEngine:
-    def __init__(self, email: str, ncbi_api_key: Optional[str] = None):
+    def __init__(self, email: str, ncbi_api_key: Optional[str] = None, ai_api_key: Optional[str] = None):
         self.ncbi = NCBIClient(email, ncbi_api_key)
-        self.hard_rules = HybridHardRulesEngine(self.ncbi)
+        self.ai = AIAnalysisClient(ai_api_key) if ai_api_key else None
+        self.hard_rules = HybridHardRulesEngine(self.ncbi, self.ai)
         self.hpa = HPADataManager()
     
     def assess(self, gene_name: str, organism: str, cell_line: Optional[str], 
@@ -1098,8 +1399,8 @@ class HybridAssessmentEngine:
             'description': gene_info.get('description', '')[:200]
         }
         
-        # 混合硬性规则检查
-        with st.spinner("⚙️ 执行混合硬性规则检查..."):
+        # 混合硬性规则检查（含AI分析）
+        with st.spinner("⚙️ 执行混合硬性规则检查（含AI语义分析）..."):
             hard_passed, hard_checks, evidence_summary = self.hard_rules.check_all(
                 gene_name, transcripts, experiment_type
             )
@@ -1187,16 +1488,16 @@ def render_sidebar():
         st.divider()
         st.subheader("AI配置（可选）")
         qwen_key = st.text_input("通义千问API Key", type="password", key="qwen_key_input", 
-                                help="可选，用于AI文献分析")
+                                help="可选，用于AI文献语义分析（增强抗病毒检测）")
         
         final_qwen = APIConfig.get_qwen_api_key()
         if final_qwen:
-            st.success("✅ AI API已配置")
+            st.success("✅ AI API已配置 - 将启用语义分析")
         else:
-            st.info("ℹ️ 未配置AI（硬性规则检查仍可正常工作）")
+            st.info("ℹ️ 未配置AI（将使用关键词匹配）")
         
         st.divider()
-        st.caption("🔒 核心列表+文献补充混合策略")
+        st.caption("🔒 核心列表+文献补充+AI语义分析混合策略")
 
 def render_main_panel():
     """渲染主面板"""
@@ -1288,19 +1589,22 @@ def render_results(result: Dict):
     tabs = st.tabs(["硬性规则检查", "HPA表达数据", "细胞评估", "序列设计"])
     
     with tabs[0]:
-        st.markdown("### 🚦 混合硬性规则检查（核心数据库+文献补充）")
+        st.markdown("### 🚦 混合硬性规则检查（核心数据库+文献补充+AI语义分析）")
         hierarchy = result.get('decision_hierarchy', {})
         hard_rules = hierarchy.get('hard_rules', {})
         evidence_summary = hard_rules.get('evidence_summary', {})
         
         # 显示检查统计
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("核心数据库命中", len(evidence_summary.get('core_hits', [])))
         with col2:
             st.metric("文献补充发现", len(evidence_summary.get('literature_hits', [])))
         with col3:
             st.metric("总检查项", len(hard_rules.get('checks', [])))
+        with col4:
+            ai_status = "✅" if evidence_summary.get('ai_analyzed') else "➖"
+            st.metric("AI语义分析", ai_status)
         
         st.divider()
         
@@ -1315,7 +1619,17 @@ def render_results(result: Dict):
                 for paper in check['evidence_papers'][:2]:
                     pmid = paper.get('pmid', '')
                     title = paper.get('title', '')[:80]
-                    evidence_md += f'<small>• <a href="https://pubmed.ncbi.nlm.nih.gov/{pmid}/" target="_blank">PMID:{pmid}</a> {html.escape(title)}...</small><br/>'
+                    
+                    # 显示AI分析结果
+                    ai_info = ""
+                    if 'ai_confidence' in paper:
+                        ai_info = f"<br/><small>🤖 AI置信度: {paper['ai_confidence']:.0%} | 机制: {paper.get('ai_mechanism', '未知')}</small>"
+                    
+                    match_info = ""
+                    if 'match_score' in paper:
+                        match_info = f" [匹配度:{paper['match_score']}]"
+                    
+                    evidence_md += f'<small>• <a href="https://pubmed.ncbi.nlm.nih.gov/{pmid}/" target="_blank">PMID:{pmid}</a> {html.escape(title)}...{match_info}</small>{ai_info}<br/>'
             
             pmid_list = check.get('pmid_list', [])
             pmid_badge = ""
@@ -1450,14 +1764,18 @@ def main():
             st.error(error)
             return
         
+        # 获取AI API Key（可选）
+        ai_key = APIConfig.get_qwen_api_key()
+        
         try:
             # 执行评估
             engine = HybridAssessmentEngine(
                 email=email,
-                ncbi_api_key=ncbi_key
+                ncbi_api_key=ncbi_key,
+                ai_api_key=ai_key
             )
             
-            with st.spinner("正在进行混合策略评估（核心数据库+文献补充）..."):
+            with st.spinner("正在进行混合策略评估（核心数据库+文献补充+AI语义分析）..."):
                 result = engine.assess(gene_clean, organism_clean, cell_clean, exp_type)
             
             render_results(result)
