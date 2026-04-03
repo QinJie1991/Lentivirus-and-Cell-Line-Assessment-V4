@@ -783,7 +783,7 @@ class AIAnalysisClient:
 
     def design_rnai_sequences(self, gene_name: str, gene_id: str = "",
                              gene_description: str = "") -> Dict:
-        """从PMC全文文献和专利数据库中检索siRNA/shRNA序列（不依赖AI生成）"""
+        """从PMC全文文献和专利数据库中检索siRNA/shRNA序列（严格仅使用文献Materials and Methods中报道的序列，禁止AI生成或推测）"""
         try:
             import re
             
@@ -1227,7 +1227,7 @@ class AIAnalysisClient:
 
     def design_crispr_sequences(self, gene_name: str, gene_id: str = "",
                                gene_description: str = "") -> Dict:
-        """从PMC全文文献中检索Materials and Methods部分的sgRNA序列（使用纯requests）"""
+        """从PMC全文文献中检索Materials and Methods部分的sgRNA序列（严格仅使用文献报道的序列，禁止AI生成或推测）"""
         try:
             import re
             import xml.etree.ElementTree as ET
@@ -4966,53 +4966,45 @@ class HybridAssessmentEngine:
         # 序列设计
         if experiment_type.lower() in ['knockdown', 'knockout']:
             if experiment_type.lower() == 'knockdown':
-                # shRNA设计仍使用AI
-                if self.ai and self.ai.api_key:
-                    try:
-                        with st.spinner("AI正在设计shRNA序列..."):
-                            design_data = self.ai.design_rnai_sequences(
-                                gene_name=gene_name,
-                                gene_id=gene_info.get('id', ''),
-                                gene_description=gene_info.get('description', '')
-                            )
-                            result['sequence_designs'] = {
-                                'type': 'siRNA/shRNA (AI设计)',
-                                'designs': design_data,
-                                'source': 'AI基于最新文献和数据库知识设计',
-                                'status': 'success' if not design_data.get('error') else 'error'
-                            }
-                    except Exception as e:
-                        logger.error(f"shRNA设计失败: {e}")
+                # siRNA/shRNA从文献检索（仅使用Materials and Methods中报道的序列，不使用AI设计）
+                try:
+                    with st.spinner("正在从PubMed文献Materials and Methods中检索已报道的siRNA/shRNA序列..."):
+                        design_data = self.ai.design_rnai_sequences(
+                            gene_name=gene_name,
+                            gene_id=gene_info.get('id', ''),
+                            gene_description=gene_info.get('description', '')
+                        )
                         result['sequence_designs'] = {
-                            'type': 'shRNA设计',
-                            'designs': {'error': str(e)},
-                            'source': '设计失败',
-                            'status': 'error'
+                            'type': 'siRNA/shRNA (文献Methods检索)',
+                            'designs': design_data,
+                            'source': 'PubMed文献Materials and Methods检索（仅使用文献报道序列，无AI推测）',
+                            'status': 'success' if not design_data.get('error') and design_data.get('sequences') else 'no_data'
                         }
-                else:
+                except Exception as e:
+                    logger.error(f"siRNA文献检索失败: {e}")
                     result['sequence_designs'] = {
-                        'type': 'shRNA设计',
-                        'designs': {'error': '未配置AI API'},
-                        'source': 'N/A',
-                        'status': 'no_api'
+                        'type': 'siRNA/shRNA检索',
+                        'designs': {'error': str(e)},
+                        'source': '检索失败',
+                        'status': 'error'
                     }
             else:
-                # CRISPR sgRNA从文献检索
+                # CRISPR sgRNA从文献检索（仅使用Materials and Methods中报道的序列，不使用AI设计）
                 try:
-                    with st.spinner("正在从PubMed文献中检索已报道的sgRNA序列..."):
+                    with st.spinner("正在从PubMed文献Materials and Methods中检索已报道的sgRNA序列..."):
                         design_data = self.ai.design_crispr_sequences(
                             gene_name=gene_name,
                             gene_id=gene_info.get('id', ''),
                             gene_description=gene_info.get('description', '')
                         )
                         result['sequence_designs'] = {
-                            'type': 'sgRNA (文献检索)',
+                            'type': 'sgRNA (文献Methods检索)',
                             'designs': design_data,
-                            'source': 'PubMed文献检索',
+                            'source': 'PubMed文献Materials and Methods检索（仅使用文献报道序列，无AI推测）',
                             'status': 'success' if not design_data.get('error') and design_data.get('sgrnas') else 'no_data'
                         }
                 except Exception as e:
-                    logger.error(f"sgRNA检索失败: {e}")
+                    logger.error(f"sgRNA文献检索失败: {e}")
                     result['sequence_designs'] = {
                         'type': 'sgRNA检索',
                         'designs': {'error': str(e)},
@@ -5060,13 +5052,14 @@ def render_sidebar():
 
         st.subheader("AI配置（可选，但强烈建议配置）")
         qwen_key = st.text_input("通义千问API Key", type="password", key="qwen_key_input",
-                                help="可选，用于AI文献语义分析、序列设计、细胞培养难点分析")
+                                help="可选，用于AI文献语义分析、细胞培养难点分析（序列设计仅使用文献Methods数据，无需AI）")
 
         final_qwen = APIConfig.get_qwen_api_key()
         if final_qwen:
             st.success("✓ AI API已配置 - 将启用智能细胞系评估和基因功能分析")
         else:
             st.warning("✗ 未配置AI API（请在上方输入或在Secrets中设置DASHSCOPE_API_KEY）")
+            st.caption("注：序列设计从文献Methods检索，不依赖AI")
 
         st.divider()
         st.caption("核心列表+文献补充+AI语义分析混合策略")
@@ -5431,7 +5424,7 @@ def render_results(result: Dict):
     tabs = st.tabs([
         "慢病毒包装可行性评估",
         "基因功能分析",
-        "HPA基因信息",     # 7类HPA基因信息
+        "HPA基因与蛋白信息",     # 整合蛋白基础功能的HPA信息
         "细胞系评估",
         "序列设计",
         "转录本选择"
@@ -5551,9 +5544,8 @@ def render_results(result: Dict):
                 
                 st.divider()
                 
-                # 检查是否有任何功能数据
+                # 检查是否有任何功能数据（不包括蛋白基础功能，已整合到HPA部分）
                 has_any_data = any([
-                    'protein_function' in data and data['protein_function'],
                     'overexpression' in data and data['overexpression'],
                     'knockdown' in data and data['knockdown'],
                     'knockout' in data and data['knockout'],
@@ -5563,15 +5555,8 @@ def render_results(result: Dict):
                 if not has_any_data:
                     st.warning("⚠️ AI分析未返回具体功能数据")
                     st.info("可能原因：1) 检索到的文献数量不足 2) AI返回格式异常 3) 该基因研究较少")
-
-                if 'protein_function' in data and data['protein_function']:
-                    with st.expander("🧬 蛋白基础功能", expanded=True):
-                        pf = data['protein_function']
-                        st.markdown(f"**蛋白类别**: {pf.get('category', 'N/A')}")
-                        st.markdown(f"**结构域**: {pf.get('domains', 'N/A')}")
-                        st.markdown(f"**信号通路**: {pf.get('pathways', 'N/A')}")
-                        st.markdown(f"**亚细胞定位**: {pf.get('cellular_location', 'N/A')}")
-                        st.markdown(f"**组织表达**: {pf.get('tissue_expression', 'N/A')}")
+                
+                st.info("ℹ️ **蛋白基础功能**已整合至「HPA基因与蛋白信息」标签页，以HPA数据为优先展示")
 
                 if 'overexpression' in data and data['overexpression']:
                     with st.expander("📈 过表达效应"):
@@ -5672,10 +5657,10 @@ def render_results(result: Dict):
         else:
             st.info("未获取到基因功能分析数据")
 
-    # ==================== HPA基因信息（7类信息展示）====================
+    # ==================== HPA基因与蛋白信息（整合蛋白基础功能）====================
     with tabs[2]:
-        st.markdown("### 🧬 HPA基因信息")
-        st.caption("数据来源: Human Protein Atlas (HPA)")
+        st.markdown("### 🧬 HPA基因与蛋白信息")
+        st.caption("数据来源: Human Protein Atlas (HPA) + 文献蛋白功能数据（HPA数据优先）")
         
         # 优先使用评估结果中已保存的HPA数据
         gene_details = result.get('hpa_gene_details')
@@ -5762,6 +5747,81 @@ def render_results(result: Dict):
                 # 显示表格 - 使用 st.table 避免依赖 tabulate
                 df_basic = pd.DataFrame(table_data)
                 st.table(df_basic)
+                
+                st.divider()
+                
+                # ========== 蛋白基础功能（整合AI分析与HPA数据，HPA优先）==========
+                st.subheader("🧬 蛋白基础功能")
+                
+                # 获取AI分析的蛋白基础功能数据
+                func_analysis = result.get('gene_function_analysis', {})
+                ai_protein_func = {}
+                if func_analysis and func_analysis.get('status') == 'success':
+                    ai_data = func_analysis.get('data', {})
+                    ai_protein_func = ai_data.get('protein_function', {})
+                
+                # HPA蛋白功能数据
+                hpa_protein_func = data.get('protein_function', {})
+                hpa_protein_loc = data.get('protein_localization', {})
+                
+                # 整合展示（HPA数据优先）
+                protein_func_data = []
+                
+                # 蛋白类别 - HPA没有此字段，使用AI数据
+                category = ai_protein_func.get('category', 'N/A')
+                if category and category != 'N/A':
+                    protein_func_data.append({"功能项": "蛋白类别", "内容": category, "来源": "文献分析"})
+                
+                # 生物过程 - HPA优先
+                biological_process = hpa_protein_func.get('biological_process', '')
+                if biological_process:
+                    protein_func_data.append({"功能项": "生物过程", "内容": biological_process, "来源": "HPA"})
+                elif ai_protein_func.get('pathways'):
+                    protein_func_data.append({"功能项": "生物过程/通路", "内容": ai_protein_func['pathways'], "来源": "文献分析"})
+                
+                # 分子功能 - HPA优先
+                molecular_function = hpa_protein_func.get('molecular_function', '')
+                if molecular_function:
+                    protein_func_data.append({"功能项": "分子功能", "内容": molecular_function, "来源": "HPA"})
+                
+                # 亚细胞定位 - HPA优先
+                subcellular_main = hpa_protein_loc.get('subcellular_main', '')
+                subcellular_add = hpa_protein_loc.get('subcellular_additional', '')
+                loc_parts = []
+                if subcellular_main:
+                    loc_parts.append(f"主要: {subcellular_main}")
+                if subcellular_add:
+                    loc_parts.append(f"附加: {subcellular_add}")
+                if loc_parts:
+                    protein_func_data.append({"功能项": "亚细胞定位", "内容": "; ".join(loc_parts), "来源": "HPA"})
+                elif ai_protein_func.get('cellular_location'):
+                    protein_func_data.append({"功能项": "亚细胞定位", "内容": ai_protein_func['cellular_location'], "来源": "文献分析"})
+                
+                # 结构域 - AI数据（HPA无此字段）
+                domains = ai_protein_func.get('domains', '')
+                if domains and domains != 'N/A':
+                    protein_func_data.append({"功能项": "结构域", "内容": domains, "来源": "文献分析"})
+                
+                # 疾病相关性 - HPA优先
+                disease_involvement = hpa_protein_func.get('disease_involvement', '')
+                if disease_involvement:
+                    protein_func_data.append({"功能项": "疾病相关性", "内容": disease_involvement, "来源": "HPA"})
+                elif ai_protein_func.get('disease_relevance'):
+                    protein_func_data.append({"功能项": "疾病相关性", "内容": ai_protein_func['disease_relevance'], "来源": "文献分析"})
+                
+                # 组织表达 - HPA优先
+                tissue_expression = data.get('rna_expression', {}).get('tissue_specificity', '')
+                if tissue_expression:
+                    protein_func_data.append({"功能项": "组织表达特异性", "内容": tissue_expression, "来源": "HPA"})
+                elif ai_protein_func.get('tissue_expression'):
+                    protein_func_data.append({"功能项": "组织表达", "内容": ai_protein_func['tissue_expression'], "来源": "文献分析"})
+                
+                if protein_func_data:
+                    df_protein = pd.DataFrame(protein_func_data)
+                    st.table(df_protein)
+                    st.caption("📌 数据整合原则：HPA数据优先，缺失项补充文献分析数据")
+                else:
+                    st.info("*暂无蛋白基础功能数据*")
                 
                 st.divider()
                 
@@ -6050,10 +6110,13 @@ def render_results(result: Dict):
             status = seq_data.get('status', 'unknown')
 
             if status == 'no_api':
-                st.warning("⚠️ 未配置AI API，无法提供序列设计")
-                st.info("请在侧边栏输入通义千问API Key，或在Secrets中设置DASHSCOPE_API_KEY")
+                st.warning("⚠️ NCBI API未配置，无法检索文献序列")
+                st.info("请在侧边栏输入NCBI邮箱和API Key")
             elif status == 'error':
-                st.error(f"❌ 序列设计失败: {seq_data.get('designs', {}).get('error', '未知错误')}")
+                st.error(f"❌ 序列检索失败: {seq_data.get('designs', {}).get('error', '未知错误')}")
+            elif status == 'no_data':
+                st.warning("⚠️ 未在文献Materials and Methods中找到序列")
+                st.info("建议：1) 查阅文献补充材料；2) 使用在线工具设计")
             else:
                 st.subheader(f"{seq_data.get('type', '')}")
                 st.caption(f"来源: {seq_data.get('source', '')}")
