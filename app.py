@@ -4700,6 +4700,67 @@ class HybridAssessmentEngine:
             gene_info = gene_info_basic if 'gene_info_basic' in locals() else {}
             result['transcript_selection'] = tx_selection
 
+        # ===== 用户输入转录本号交叉验证 =====
+        user_transcript_id = st.session_state.get('user_transcript_id', '').strip()
+        if user_transcript_id:
+            system_selected = tx_selection.get('selected_transcript', {}) or {}
+            system_transcript_id = system_selected.get('id', '') if system_selected else ''
+            
+            if system_transcript_id and system_transcript_id.upper() == user_transcript_id.upper():
+                # 用户输入与系统选择一致
+                result['transcript_validation'] = {
+                    'status': 'match',
+                    'user_input': user_transcript_id,
+                    'system_selected': system_transcript_id,
+                    'message': f'✓ 用户输入的转录本 {user_transcript_id} 与系统推荐一致'
+                }
+            elif system_transcript_id:
+                # 用户输入与系统选择不一致，提示用户
+                result['transcript_validation'] = {
+                    'status': 'mismatch',
+                    'user_input': user_transcript_id,
+                    'system_selected': system_transcript_id,
+                    'message': f'⚠️ 用户输入的转录本 {user_transcript_id} 不是最优转录本',
+                    'recommendation': f'推荐使用: {system_transcript_id}'
+                }
+                result['warnings'].append(f"转录本提示：您输入的 {user_transcript_id} 不是最优转录本，推荐使用 {system_transcript_id}")
+            else:
+                # 系统未返回结果，使用用户输入的转录本
+                # 尝试获取用户输入转录本的长度信息
+                user_tx_length = None
+                try:
+                    # 从转录本列表中查找用户输入的转录本
+                    for tx in tx_selection.get('all_transcripts', []):
+                        if tx.get('id', '').upper() == user_transcript_id.upper():
+                            user_tx_length = tx.get('length', 0)
+                            break
+                    # 如果没找到，尝试从NCBI获取基本信息
+                    if not user_tx_length and self.ncbi:
+                        # 创建一个基本的转录本信息
+                        user_tx_info = {
+                            'id': user_transcript_id,
+                            'length': 0,  # 未知长度
+                            'source': 'user_input'
+                        }
+                        # 添加到转录本列表
+                        if 'all_transcripts' not in tx_selection or not tx_selection['all_transcripts']:
+                            tx_selection['all_transcripts'] = []
+                        tx_selection['all_transcripts'].append(user_tx_info)
+                        # 设置为选中的转录本
+                        tx_selection['selected_transcript'] = user_tx_info
+                        
+                except Exception as e:
+                    logger.warning(f"获取用户输入转录本信息失败: {e}")
+                
+                result['transcript_validation'] = {
+                    'status': 'user_fallback',
+                    'user_input': user_transcript_id,
+                    'system_selected': None,
+                    'message': f'使用用户输入的转录本 {user_transcript_id} 进行分析',
+                    'note': '系统转录本评估未返回结果，采用用户输入'
+                }
+                result['warnings'].append(f"使用用户输入的转录本 {user_transcript_id} 进行分析（系统评估未返回结果）")
+
         result['gene_info'] = {
             'id': gene_info.get('id', ''),
             'name': gene_info.get('name', ''),
@@ -5175,6 +5236,19 @@ def render_main_panel():
         # 基因输入完全基于HPA数据包（抛弃NCBI自动补全）
         gene_component = GeneInputComponent(hpa_gene_service, hpa_detail_service)
         gene = gene_component.render(organism, key_prefix="main_gene", disabled=is_locked)
+        
+        # ===== 转录本号输入（可选，用于交叉验证）=====
+        user_transcript_id = st.text_input(
+            "转录本号（可选，用于交叉验证）",
+            value=st.session_state.get('user_transcript_id', ''),
+            placeholder="例如：NM_001101.3, XM_017012345.1...",
+            help="输入RefSeq转录本号，系统将与自动评估的最优转录本进行交叉验证",
+            key="user_transcript_input",
+            disabled=is_locked
+        )
+        st.session_state['user_transcript_id'] = user_transcript_id
+        if user_transcript_id:
+            st.caption(f"✓ 已输入转录本号: {user_transcript_id}")
 
     with col2:
         # ===== HPA细胞系自动补全输入（新增功能）=====
@@ -5435,11 +5509,27 @@ def render_results(result: Dict):
         
         # ===== CDS长度信息 =====
         tx_data = result.get('transcript_selection', {})
+        tx_validation = result.get('transcript_validation', {})
         if tx_data and isinstance(tx_data, dict):
             selected = tx_data.get('selected_transcript', {})
             
             with st.container():
                 st.subheader("📏 转录本/CDS信息")
+                
+                # 显示用户输入转录本验证信息
+                if tx_validation:
+                    val_status = tx_validation.get('status', '')
+                    user_tx = tx_validation.get('user_input', '')
+                    system_tx = tx_validation.get('system_selected', '')
+                    
+                    if val_status == 'match':
+                        st.success(f"✓ 用户输入转录本 {user_tx} 与系统推荐一致")
+                    elif val_status == 'mismatch':
+                        st.warning(f"⚠️ 用户输入: {user_tx}")
+                        st.info(f"💡 系统推荐: {system_tx}")
+                    elif val_status == 'user_fallback':
+                        st.info(f"ℹ️ 使用用户输入转录本: {user_tx}")
+                        st.caption("系统评估未返回结果，采用用户输入")
                 
                 # 检查是否有错误
                 if tx_data.get('error'):
@@ -6251,6 +6341,21 @@ def render_results(result: Dict):
     with tabs[5]:
         st.markdown("### 转录本选择详情（多数据库交叉验证）")
         tx_data = result.get('transcript_selection', {})
+        
+        # ===== 显示用户输入转录本验证结果 =====
+        tx_validation = result.get('transcript_validation', {})
+        if tx_validation:
+            val_status = tx_validation.get('status', '')
+            if val_status == 'match':
+                st.success(f"✓ {tx_validation.get('message', '')}")
+            elif val_status == 'mismatch':
+                st.warning(f"⚠️ {tx_validation.get('message', '')}")
+                st.info(f"💡 {tx_validation.get('recommendation', '')}")
+            elif val_status == 'user_fallback':
+                st.info(f"ℹ️ {tx_validation.get('message', '')}")
+                if tx_validation.get('note'):
+                    st.caption(tx_validation['note'])
+        
         if tx_data and isinstance(tx_data, dict):
             if not tx_data.get('error'):
                 try:
