@@ -4423,7 +4423,11 @@ class GeneInputComponent:
             
             if rna_table_data:
                 df_rna = pd.DataFrame(rna_table_data)
-                st.table(df_rna)
+                # 将表达量列中的分号替换为换行符，提升可读性
+                if '表达量' in df_rna.columns:
+                    df_rna['表达量'] = df_rna['表达量'].str.replace('; ', '<br>', regex=False)
+                # 使用 HTML 渲染以支持换行
+                st.markdown(df_rna.to_html(escape=False, index=False), unsafe_allow_html=True)
                 
                 # 数据解读结论
                 st.markdown("**📌 数据解读**")
@@ -5652,7 +5656,7 @@ def render_results(result: Dict):
                     st.warning("⚠️ AI分析未返回具体功能数据")
                     st.info("可能原因：1) 检索到的文献数量不足 2) AI返回格式异常 3) 该基因研究较少")
                 
-                st.info("ℹ️ **蛋白基础功能**已整合至「HPA基因与蛋白信息」标签页，以HPA数据为优先展示")
+                # 提示已删除：蛋白基础功能已整合至HPA基因与蛋白信息标签页
 
                 if 'overexpression' in data and data['overexpression']:
                     with st.expander("📈 过表达效应"):
@@ -5813,23 +5817,6 @@ def render_results(result: Dict):
                     genome_display = "N/A"
                 table_data.append({"信息项": "基因组位置", "内容": genome_display})
                 
-                # 蛋白定位与功能
-                loc = data.get('protein_localization', {})
-                func = data.get('protein_function', {})
-                protein_info_parts = []
-                if loc.get('subcellular_main'):
-                    protein_info_parts.append(f"主要定位: {loc['subcellular_main']}")
-                if loc.get('subcellular_additional'):
-                    protein_info_parts.append(f"附加定位: {loc['subcellular_additional']}")
-                if loc.get('secretome_location'):
-                    protein_info_parts.append(f"分泌位置: {loc['secretome_location']}")
-                if func.get('biological_process'):
-                    protein_info_parts.append(f"生物过程: {func['biological_process']}")
-                if func.get('molecular_function'):
-                    protein_info_parts.append(f"分子功能: {func['molecular_function']}")
-                protein_display = "; ".join(protein_info_parts) if protein_info_parts else "N/A"
-                table_data.append({"信息项": "蛋白定位与功能", "内容": protein_display})
-                
                 # 抗体推荐
                 antibody = data.get('antibody', {})
                 if antibody.get('name'):
@@ -5971,7 +5958,11 @@ def render_results(result: Dict):
                 
                 if rna_table_data:
                     df_rna = pd.DataFrame(rna_table_data)
-                    st.table(df_rna)
+                    # 将表达量列中的分号替换为换行符，提升可读性
+                    if '表达量' in df_rna.columns:
+                        df_rna['表达量'] = df_rna['表达量'].str.replace('; ', '<br>', regex=False)
+                    # 使用 HTML 渲染以支持换行
+                    st.markdown(df_rna.to_html(escape=False, index=False), unsafe_allow_html=True)
                     
                     # 数据解读结论
                     st.markdown("**📌 数据解读**")
@@ -6036,7 +6027,7 @@ def render_results(result: Dict):
 
                 st.divider()
 
-                st.subheader("细胞培养难点清单")
+                st.subheader("细胞培养难点")
                 culture_diff = cell_data.get('culture_difficulty', {})
                 if culture_diff and isinstance(culture_diff, dict):
                     if culture_diff.get('error'):
@@ -6049,113 +6040,57 @@ def render_results(result: Dict):
                             else:
                                 st.info(f"🤖 {note}")
 
-                        # 精简后的展示逻辑
-                        has_any = False
+                        # 整合所有培养难点信息为一段话总结
+                        difficulty_parts = []
                         
-                        # 1. 气体/环境敏感 - 只显示非5% CO2、非37°C时提示实际的培养条件，不然显示"37°C，5% CO2"
+                        # 收集各类难点信息
                         env_items = culture_diff.get('environment', [])
-                        env_display = []
-                        # 检查是否有特殊环境要求
-                        has_special_env = False
                         for item in env_items:
-                            # 排除常规条件
-                            if any(x in item for x in ['5% CO₂', '37℃', '37 °C', '37°C']):
-                                continue
                             if '低氧' in item or '非5%' in item or '非37' in item or '震荡' in item or 'pH' in item:
-                                env_display.append(item)
-                                has_special_env = True
+                                difficulty_parts.append(item)
                         
-                        with st.expander("🌡️ 气体/环境敏感", expanded=False):
-                            if has_special_env:
-                                for item in env_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #e3f2fd; border-radius: 5px; border-left: 3px solid #2196F3;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>37°C，5% CO₂</div>", unsafe_allow_html=True)
-                        
-                        # 2. 操作复杂度 - 只有非0.25%胰酶消化时提示
                         op_items = culture_diff.get('operation', [])
-                        op_display = []
                         for item in op_items:
-                            # 排除0.25%胰酶（常规条件）
-                            if '0.25%胰酶' in item or '0.25% 胰酶' in item:
-                                continue
-                            op_display.append(item)
+                            if '0.25%胰酶' not in item and '0.25% 胰酶' not in item:
+                                difficulty_parts.append(item)
                         
-                        with st.expander("🔧 操作复杂度", expanded=False):
-                            if op_display:
-                                for item in op_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #fff3e0; border-radius: 5px; border-left: 3px solid #FF9800;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>常规操作，无特殊要求</div>", unsafe_allow_html=True)
-                        
-                        # 3. 时间/成本 - 只有细胞增殖速度低（文献中特别提到增殖慢、倍增时间超过48小时）时提示
                         tc_items = culture_diff.get('time_cost', [])
-                        tc_display = []
                         for item in tc_items:
-                            # 只保留明确提到增殖慢、倍增时间>48小时的条目
                             if any(x in item for x in ['>48小时', '超过48小时', '倍增时间', '生长极其缓慢', '增殖慢', '生长缓慢']):
-                                tc_display.append(item)
+                                difficulty_parts.append(item)
                         
-                        with st.expander("⏱️ 时间/成本", expanded=False):
-                            if tc_display:
-                                for item in tc_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #e8f5e9; border-radius: 5px; border-left: 3px solid #4CAF50;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>常规生长速度，无特殊要求</div>", unsafe_allow_html=True)
-                        
-                        # 4. 关键警告 - 支原体属于常规管控项，不做提示。否则反馈"无特殊要求"
                         warn_items = culture_diff.get('special_warnings', [])
-                        warn_display = []
                         for item in warn_items:
-                            # 排除支原体相关（常规管控项）
-                            if '支原体' in item:
-                                continue
-                            warn_display.append(item)
+                            if '支原体' not in item:
+                                difficulty_parts.append(item)
                         
-                        with st.expander("⚠️ 关键警告", expanded=True):  # 关键警告默认展开
-                            if warn_display:
-                                for item in warn_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #ffcdd2; border-radius: 5px; border-left: 3px solid #f44336;'><strong>{html.escape(str(item))}</strong></div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>无特殊要求</div>", unsafe_allow_html=True)
-                        
-                        # 5. Protocol建议 - 只有提示必须每天换液、每天传代时提示。否则反馈"无特殊要求"
                         proto_items = culture_diff.get('protocol_tips', [])
-                        proto_display = []
                         for item in proto_items:
-                            # 只保留必须每天换液/传代的提示
                             if any(x in item for x in ['每天换液', '每天传代', '每日换液', '每日传代', '必须每天']):
-                                proto_display.append(item)
+                                difficulty_parts.append(item)
                         
-                        with st.expander("💡 Protocol建议", expanded=False):
-                            if proto_display:
-                                for item in proto_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #e0f7fa; border-radius: 5px; border-left: 3px solid #00BCD4;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>无特殊要求</div>", unsafe_allow_html=True)
-                        
-                        # 培养基和基质要求保持不变（始终显示，因为这些是重要的信息）
                         cm_items = culture_diff.get('culture_medium', [])
-                        if cm_items:
-                            has_any = True
-                            with st.expander("🧫 培养基特殊要求", expanded=False):
-                                for item in cm_items:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #ffebee; border-radius: 5px; border-left: 3px solid #E91E63;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
+                        difficulty_parts.extend(cm_items)
                         
                         coat_items = culture_diff.get('coating_matrix', [])
-                        if coat_items:
-                            has_any = True
-                            with st.expander("🔲 基质/包被要求", expanded=False):
-                                for item in coat_items:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #f3e5f5; border-radius: 5px; border-left: 3px solid #9C27B0;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-
-                        if not has_any:
-                            st.success("✓ 未检索到该细胞系的特殊培养难点，可能为常规培养细胞")
+                        difficulty_parts.extend(coat_items)
+                        
+                        # 生成总结描述
+                        if difficulty_parts:
+                            # 去重并清理
+                            seen = set()
+                            unique_parts = []
+                            for part in difficulty_parts:
+                                # 移除PMID标注用于去重判断
+                                clean_part = part.split('[PMID:')[0].strip() if '[PMID:' in part else part
+                                if clean_part not in seen:
+                                    seen.add(clean_part)
+                                    unique_parts.append(part)
+                            
+                            summary = "该细胞系培养需要注意以下方面：" + "；".join(unique_parts[:8]) + "。"
+                            st.markdown(f"<div style='padding: 12px; background-color: #f5f5f5; border-radius: 8px; border-left: 4px solid #2196F3; line-height: 1.6;'>" + summary + "</div>", unsafe_allow_html=True)
+                        else:
+                            st.markdown("<div style='padding: 12px; background-color: #e8f5e9; border-radius: 8px; border-left: 4px solid #4CAF50;'>该细胞系培养条件较为常规，按标准37°C、5% CO₂条件培养即可，无特殊难点。</div>", unsafe_allow_html=True)
 
                         if culture_diff.get('verified_by'):
                             with st.expander("支持文献/依据"):
@@ -6549,21 +6484,7 @@ def main():
             st.error(f"系统错误: {str(e)}")
             st.exception(e)
     
-    # ===== 底部：日志显示区域 =====
-    with st.expander("📋 应用日志（点击展开）", expanded=False):
-        if st.session_state['app_logs']:
-            # 复制按钮
-            log_text = "\n".join([f"[{log['time']}] {log['level']}: {log['message']}" 
-                                  for log in st.session_state['app_logs']])
-            st.text_area("日志内容（可复制）", log_text, height=200, key="log_display")
-            
-            col1, col2 = st.columns([1, 5])
-            with col1:
-                if st.button("🗑️ 清空日志"):
-                    st.session_state['app_logs'] = []
-                    st.rerun()
-        else:
-            st.caption("暂无日志")
+    # 应用日志已隐藏（根据需求不再显示）
 
 if __name__ == "__main__":
     main()
