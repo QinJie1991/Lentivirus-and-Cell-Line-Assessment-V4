@@ -5189,15 +5189,16 @@ def render_main_panel():
     if 'cell_line_input' not in st.session_state:
         st.session_state.cell_line_input = ''
 
-    col1, col2 = st.columns(2)
-
     # 检查是否处于锁定状态
     is_locked = st.session_state.get('assessment_locked', False)
     
     if is_locked:
         st.warning("🔒 当前评估已锁定。如需进行新评估，请点击下方的「开始新评估」按钮。")
 
-    with col1:
+    # ===== 第一行：物种 + 转录本号 =====
+    row1_col1, row1_col2 = st.columns(2)
+    
+    with row1_col1:
         organism = st.selectbox(
             "物种",
             ["human", "mouse", "rat", "cho", "pig", "monkey"],
@@ -5212,31 +5213,7 @@ def render_main_panel():
             disabled=is_locked
         )
 
-        # ===== HPA基因自动补全服务初始化 =====
-        if 'hpa_gene_service' not in st.session_state:
-            # 尝试从现有的HPA管理器获取数据文件路径
-            hpa_manager = st.session_state.get('hpa_manager')
-            if hpa_manager:
-                # 检查HPA数据是否可用
-                hpa_status = hpa_manager.check_and_download()
-                if hpa_status.get('error'):
-                    st.warning(f"⚠️ HPA数据下载失败: {hpa_status['error']}")
-                    st.info("📌 请刷新页面重新尝试下载")
-                elif not hpa_status.get('exists') and not hpa_status.get('downloaded'):
-                    st.warning("⚠️ HPA数据尚未下载")
-                    st.info("📌 首次使用需要下载约200MB数据，请刷新页面")
-            
-            st.session_state['hpa_gene_service'] = HPAGeneAutocompleteService(hpa_manager)
-            st.session_state['hpa_gene_detail_service'] = HPAGeneDetailService(hpa_manager)
-        
-        hpa_gene_service = st.session_state.get('hpa_gene_service')
-        hpa_detail_service = st.session_state.get('hpa_gene_detail_service')
-        
-        gene_service = GeneAutocompleteService()  # 保留用于其他可能的用途
-        # 基因输入完全基于HPA数据包（抛弃NCBI自动补全）
-        gene_component = GeneInputComponent(hpa_gene_service, hpa_detail_service)
-        gene = gene_component.render(organism, key_prefix="main_gene", disabled=is_locked)
-        
+    with row1_col2:
         # ===== 转录本号输入（可选，用于交叉验证）=====
         user_transcript_id = st.text_input(
             "转录本号（可选，用于交叉验证）",
@@ -5250,7 +5227,10 @@ def render_main_panel():
         if user_transcript_id:
             st.caption(f"✓ 已输入转录本号: {user_transcript_id}")
 
-    with col2:
+    # ===== 第二行：细胞系 + 基因名 =====
+    row2_col1, row2_col2 = st.columns(2)
+    
+    with row2_col1:
         # ===== HPA细胞系自动补全输入（新增功能）=====
         if 'cell_line_component' not in st.session_state:
             st.session_state.cell_line_component = HPACellLineAutocompleteService()
@@ -5371,6 +5351,32 @@ def render_main_panel():
                 'is_valid': cell_service.is_valid_cell_line(cell_line_value) if cell_line_value else False,
                 'hpa_standard_name': cell_line_value if cell_service.is_valid_cell_line(cell_line_value) else None
             }
+
+    with row2_col2:
+        # ===== HPA基因自动补全服务初始化 =====
+        if 'hpa_gene_service' not in st.session_state:
+            # 尝试从现有的HPA管理器获取数据文件路径
+            hpa_manager = st.session_state.get('hpa_manager')
+            if hpa_manager:
+                # 检查HPA数据是否可用
+                hpa_status = hpa_manager.check_and_download()
+                if hpa_status.get('error'):
+                    st.warning(f"⚠️ HPA数据下载失败: {hpa_status['error']}")
+                    st.info("📌 请刷新页面重新尝试下载")
+                elif not hpa_status.get('exists') and not hpa_status.get('downloaded'):
+                    st.warning("⚠️ HPA数据尚未下载")
+                    st.info("📌 首次使用需要下载约200MB数据，请刷新页面")
+            
+            st.session_state['hpa_gene_service'] = HPAGeneAutocompleteService(hpa_manager)
+            st.session_state['hpa_gene_detail_service'] = HPAGeneDetailService(hpa_manager)
+        
+        hpa_gene_service = st.session_state.get('hpa_gene_service')
+        hpa_detail_service = st.session_state.get('hpa_gene_detail_service')
+        
+        gene_service = GeneAutocompleteService()  # 保留用于其他可能的用途
+        # 基因输入完全基于HPA数据包（抛弃NCBI自动补全）
+        gene_component = GeneInputComponent(hpa_gene_service, hpa_detail_service)
+        gene = gene_component.render(organism, key_prefix="main_gene", disabled=is_locked)
 
     exp_type = st.selectbox(
         "评估选项",
