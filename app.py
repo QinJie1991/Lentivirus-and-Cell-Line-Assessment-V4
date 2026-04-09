@@ -4245,17 +4245,14 @@ class GeneInputComponent:
                     matched_name = gene.get('matched_name', '')
                     name_type = gene.get('name_type', '')
                     
-                    # 显示匹配类型图标
-                    icons = {'exact': '✓', 'prefix': '↳', 'substring': '~', 'fuzzy': '≈'}
-                    icon = icons.get(match_type, '•')
-                    
                     # 如果匹配的是synonym，显示原始匹配名
                     if name_type == 'synonym' and matched_name and matched_name.upper() != gene['symbol'].upper():
-                        display_text = f"{icon} {gene['symbol']} (via {matched_name})"
-                    else:
-                        display_text = f"{icon} {gene['symbol']}"
+                        display_text = f"{gene['symbol']} (via {matched_name})"
                     
-                    btn_type = "primary" if match_type == 'exact' else "secondary"
+                    # 最高分（第一个）用primary，其他用secondary，但不加勾选符号
+                    # 勾选符号只在用户点击后显示
+                    is_highest_score = i == 0 and len(suggestions) > 0
+                    btn_type = "primary" if is_highest_score else "secondary"
                     help_text = f"匹配: {matched_name} ({match_type})" if matched_name else f"匹配类型: {match_type}"
                     
                     if st.button(display_text, key=f"{key_prefix}_sug_{i}", use_container_width=True, type=btn_type, help=help_text):
@@ -4278,7 +4275,7 @@ class GeneInputComponent:
                 hpa_details = self.hpa_detail_service.get_gene_details(gene_symbol)
                 st.session_state[hpa_info_key] = hpa_details
             
-            # 显示选择信息
+            # 显示选择信息 - 这里显示勾选符号
             if f"{key_prefix}_info" in st.session_state:
                 gene_info = st.session_state[f"{key_prefix}_info"]
                 match_info = ""
@@ -4664,32 +4661,220 @@ class FourStepSequenceDesign:
     def _step2_extract_sequences(self, gene_name: str, experiment_type: str, 
                                   organism: str, papers: List[Dict]) -> Dict:
         """
-        步骤2: 提取Methods中的序列，或标记"序列在补充材料"
+        步骤2: 从PMC开放获取全文中提取明确标注的序列
         
-        注：这是一个标记系统，实际提取需要全文解析
-        这里标记需要人工查阅的文献
+        借鉴原则（来自通用型文献sgRNA序列提取工具）：
+        - 仅从NCBI PMC开放获取全文中提取明确标注的序列
+        - 不预测、不补全、不依赖外部数据库
+        - 输出结果必须经人工对照原文/补充材料验证
         """
+        import re
+        import xml.etree.ElementTree as ET
+        
         result = {
-            'sequences_found': [],  # 在Methods中找到的序列
-            'in_methods': [],       # 序列在Methods中的文献
-            'in_supplementary': [], # 序列在补充材料的文献
-            'needs_manual_check': [] # 需要人工查阅的文献
+            'sequences_found': [],      # 提取到的序列
+            'in_methods': [],           # 在Methods中找到的文献
+            'in_supplementary': [],     # 可能在补充材料中的文献
+            'needs_manual_check': [],   # 需要人工查阅的文献
+            'verification_note': '⚠️ 所有提取的序列必须人工对照原文/补充材料验证'
         }
         
-        try:
-            for paper in papers:
-                # 目前无法自动提取Methods中的序列
-                # 标记这些文献供用户手动查阅
-                result['needs_manual_check'].append({
-                    'pmid': paper.get('pmid'),
-                    'title': paper.get('title'),
-                    'note': '需查阅Methods部分寻找shRNA/sgRNA序列',
-                    'url': paper.get('url')
-                })
+        # NCBI请求间隔（秒）- 遵守速率限制
+        RATE_LIMIT_SEC = 0.4
+        MAX_PAPERS_TO_CHECK = 10  # 最多检查10篇文献
+        
+        def fetch_pmc_fulltext(pmcid: str) -> str:
+            """下载PMC OA全文XML并提取纯文本"""
+            try:
+                fetch_params = {
+                    'db': 'pmc',
+                    'id': pmcid,
+                    'rettype': 'xml',
+                    'retmode': 'xml'
+                }
+                
+                import time
+                time.sleep(RATE_LIMIT_SEC)
+                
+                xml_data = self.ncbi._make_request('efetch.fcgi', fetch_params)
+                
+                if not xml_data:
+                    return ""
+                
+                # 如果是字符串，解析它
+                if isinstance(xml_data, str):
+                    try:
+                        root = ET.fromstring(xml_data)
+                    except ET.ParseError:
+                        return xml_data  # 返回原始文本
+                else:
+                    return str(xml_data)
+                
+                # 提取所有文本节点
+                text_parts = []
+                for elem in root.iter():
+                    if elem.text:
+                        text_parts.append(elem.text.strip())
+                    if elem.tail:
+                        text_parts.append(elem.tail.strip())
+                return " ".join(filter(None, text_parts))
+            except Exception as e:
+                logger.warning(f"无法获取 PMC{pmcid}: {e}")
+                return ""
+        
+        def extract_explicit_sgrna(text: str, gene: str) -> list:
+            """保守提取：仅匹配明确声明靶向该基因且长度18-22nt的序列"""
+            matches = []
+            # 模式1：显式标注 sgRNA/guide 序列
+            pat1 = re.compile(
+                rf'(?:{re.escape(gene)}.*?)(?:sgRNA|guide\s*RNA|targeting\s*sequence|gRNA)\s*(?:is|:|=)\s*([ATGCatgc]{{18,22}})',
+                re.IGNORECASE | re.DOTALL
+            )
+            # 模式2：5'-[ATGC]20-3' 格式
+            pat2 = re.compile(r"5'\s*-?\s*([ATGCatgc]{18,22})\s*-?\s*3'", re.IGNORECASE)
+            # 模式3：表格/补充材料常见标注
+            pat3 = re.compile(
+                r'(?:SEQ\s*ID\s*NO[:.]?\s*\d+\s*[=:]?\s*)([ATGCatgc]{18,22})',
+                re.IGNORECASE
+            )
+            # 模式4：shRNA/siRNA序列
+            pat4 = re.compile(
+                rf'(?:{re.escape(gene)}.*?)(?:shRNA|siRNA|hairpin)\s*(?:target|sequence|oligo)?\s*(?::|=)\s*([ATGCatgc]{{18,25}})',
+                re.IGNORECASE | re.DOTALL
+            )
             
-            # 如果有AI客户端，尝试分析文献
-            # 这里只是一个标记框架
-            result['note'] = '自动提取Methods中的序列需要全文访问权限，建议人工查阅上述文献'
+            for pat in [pat1, pat2, pat3, pat4]:
+                for m in pat.finditer(text):
+                    seq = m.group(1).upper()
+                    if 18 <= len(seq) <= 25:
+                        matches.append(seq)
+            return list(set(matches))  # 去重
+        
+        try:
+            logger.info(f"🔍 开始从PMC全文中提取 {gene_name} 的序列")
+            
+            if not papers:
+                result['message'] = '无文献可供检查'
+                return result
+            
+            # 处理每篇文献
+            for i, paper in enumerate(papers[:MAX_PAPERS_TO_CHECK]):
+                pmid = paper.get('pmid')
+                title = paper.get('title', '')
+                
+                try:
+                    import time
+                    time.sleep(RATE_LIMIT_SEC)
+                    
+                    # 获取PMCID（仅OA文献有）
+                    link_params = {
+                        'dbfrom': 'pubmed',
+                        'db': 'pmc',
+                        'id': pmid,
+                        'retmode': 'json'
+                    }
+                    link_result = self.ncbi._make_request('elink.fcgi', link_params)
+                    
+                    if not link_result or not link_result.get('linksets'):
+                        result['needs_manual_check'].append({
+                            'pmid': pmid,
+                            'title': title,
+                            'reason': '无PMC开放获取全文，需通过PubMed或期刊网站查阅',
+                            'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                        })
+                        continue
+                    
+                    # 提取PMCID
+                    pmcid = None
+                    for linkset in link_result.get('linksets', []):
+                        for linksetdb in linkset.get('linksetdbs', []):
+                            if linksetdb.get('dbto') == 'pmc':
+                                links = linksetdb.get('links', [])
+                                if links:
+                                    pmcid = links[0]
+                                    break
+                        if pmcid:
+                            break
+                    
+                    if not pmcid:
+                        result['needs_manual_check'].append({
+                            'pmid': pmid,
+                            'title': title,
+                            'reason': '未找到PMCID，文献可能不在开放获取数据库中',
+                            'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                        })
+                        continue
+                    
+                    # 获取PMC全文
+                    full_text = fetch_pmc_fulltext(pmcid)
+                    
+                    if not full_text:
+                        result['needs_manual_check'].append({
+                            'pmid': pmid,
+                            'title': title,
+                            'pmcid': pmcid,
+                            'reason': '无法获取PMC全文，可能需要订阅',
+                            'url': f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
+                        })
+                        continue
+                    
+                    # 提取序列
+                    seqs = extract_explicit_sgrna(full_text, gene_name)
+                    
+                    if seqs:
+                        # 提取上下文片段
+                        context = re.search(
+                            rf'.{{0,150}}(?:{re.escape(gene_name)}).{{0,150}}', 
+                            full_text, re.IGNORECASE | re.DOTALL
+                        )
+                        context_str = context.group(0).replace("\n", " ")[:300] + "..." if context else "N/A"
+                        
+                        result['sequences_found'].append({
+                            'pmid': pmid,
+                            'pmcid': f"PMC{pmcid}",
+                            'title': title,
+                            'sequences': [
+                                {
+                                    'sequence': seq,
+                                    'length': len(seq),
+                                    'match_type': 'explicit'
+                                } for seq in seqs
+                            ],
+                            'context': context_str,
+                            'url': f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/",
+                            'verification_status': '⚠️ 未验证（必须人工对照原文Supplementary/Sequence Listing）'
+                        })
+                        result['in_methods'].append(paper)
+                        logger.info(f"✅ 从 PMC{pmcid} 提取到 {len(seqs)} 条序列")
+                    else:
+                        # 全文已获取但未找到序列，可能在补充材料中
+                        result['in_supplementary'].append({
+                            'pmid': pmid,
+                            'pmcid': f"PMC{pmcid}",
+                            'title': title,
+                            'reason': '已获取全文但未找到明确标注的序列，可能在补充材料(Supplementary)中',
+                            'url': f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
+                        })
+                
+                except Exception as e:
+                    logger.warning(f"❌ 处理 PMID {pmid} 时出错: {e}")
+                    result['needs_manual_check'].append({
+                        'pmid': pmid,
+                        'title': title,
+                        'reason': f'处理出错: {str(e)[:100]}',
+                        'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                    })
+                    continue
+            
+            # 添加总结
+            result['summary'] = {
+                'total_papers_checked': len(papers[:MAX_PAPERS_TO_CHECK]),
+                'sequences_extracted': len(result['sequences_found']),
+                'in_supplementary': len(result['in_supplementary']),
+                'needs_manual_check': len(result['needs_manual_check'])
+            }
+            
+            logger.info(f"✅ 序列提取完成: {result['summary']}")
             
         except Exception as e:
             result['error'] = str(e)
@@ -5517,10 +5702,10 @@ def render_main_panel():
 
                 for i, sug in enumerate(suggestions):
                     with cols[i % 4]:
-                        # 精确匹配显示特殊标记
-                        is_exact = sug['match_type'] == 'exact'
-                        label = f"✓ {sug['display_name']}" if is_exact else sug['display_name']
-                        btn_type = "primary" if is_exact else "secondary"
+                        # 最高分（第一个）用primary强调，但不加勾选符号
+                        is_highest_score = i == 0 and len(suggestions) > 0
+                        label = sug['display_name']
+                        btn_type = "primary" if is_highest_score else "secondary"
                         help_text = f"匹配类型: {sug['match_type']}, 分数: {sug['score']}"
 
                         if st.button(label, key=f"cell_sug_{i}", use_container_width=True,
@@ -6473,24 +6658,60 @@ def render_results(result: Dict):
             
             # Step 2: 序列提取
             with step_tabs[1]:
-                st.markdown("#### 步骤2: 提取Methods中的序列")
+                st.markdown("#### 步骤2: 从PMC开放获取全文提取序列")
                 step2 = four_step.get('step2_extract_sequences', {})
                 
-                needs_check = step2.get('needs_manual_check', [])
-                if needs_check:
-                    st.info(f"**需人工查阅Methods的文献 ({len(needs_check)}篇)**")
-                    st.caption("自动提取Methods中的序列需要全文访问权限，请人工查阅以下文献")
+                # 显示提取到的序列
+                sequences_found = step2.get('sequences_found', [])
+                if sequences_found:
+                    st.success(f"✅ 从 {len(sequences_found)} 篇PMC文献中提取到序列")
+                    st.warning(step2.get('verification_note', '⚠️ 所有提取的序列必须人工对照原文/补充材料验证'))
                     
-                    for i, item in enumerate(needs_check, 1):
+                    for i, item in enumerate(sequences_found, 1):
+                        with st.expander(f"📄 文献 {i}: {item.get('title', '')[:50]}..."):
+                            st.write(f"**标题**: {item.get('title', '')}")
+                            st.markdown(f"**PubMed**: [{item.get('pmid', '')}]({item.get('url', '')})")
+                            st.markdown(f"**PMC全文**: [{item.get('pmcid', '')}]({item.get('url', '')})")
+                            
+                            st.write("**提取到的序列**:")
+                            for seq_data in item.get('sequences', []):
+                                seq = seq_data.get('sequence', '')
+                                match_type = seq_data.get('match_type', '')
+                                length = seq_data.get('length', 0)
+                                st.code(f"{seq} ({length}nt, {match_type})", language='text')
+                            
+                            with st.expander("查看上下文片段"):
+                                st.text(item.get('context', 'N/A'))
+                            
+                            st.error(f"**⚠️ {item.get('verification_status', '')}**")
+                
+                # 显示可能在补充材料中的文献
+                in_supplementary = step2.get('in_supplementary', [])
+                if in_supplementary:
+                    st.info(f"📎 可能在补充材料中的文献 ({len(in_supplementary)}篇)")
+                    for i, item in enumerate(in_supplementary, 1):
+                        with st.expander(f"{i}. {item.get('title', '')[:50]}..."):
+                            st.write(f"**标题**: {item.get('title', '')}")
+                            st.markdown(f"**PMC**: [{item.get('pmcid', '')}]({item.get('url', '')})")
+                            st.caption(f"💡 {item.get('reason', '')}")
+                
+                # 显示需要人工查阅的文献
+                needs_manual = step2.get('needs_manual_check', [])
+                if needs_manual:
+                    st.info(f"📋 需要人工查阅的文献 ({len(needs_manual)}篇)")
+                    for i, item in enumerate(needs_manual, 1):
                         with st.expander(f"{i}. {item.get('title', '')[:50]}..."):
                             st.write(f"**标题**: {item.get('title', '')}")
                             st.markdown(f"**PubMed**: [{item.get('pmid', '')}]({item.get('url', '')})")
-                            st.warning(f"**注意**: {item.get('note', '')}")
-                else:
-                    st.info("无文献需要查阅")
+                            st.caption(f"💡 {item.get('reason', '')}")
                 
-                if step2.get('note'):
-                    st.caption(f"💡 {step2['note']}")
+                # 显示总结
+                if step2.get('summary'):
+                    summary = step2['summary']
+                    st.caption(f"**统计**: 检查了{summary.get('total_papers_checked', 0)}篇文献，"
+                              f"提取到{summary.get('sequences_extracted', 0)}篇的序列，"
+                              f"{summary.get('in_supplementary', 0)}篇可能在补充材料，"
+                              f"{summary.get('needs_manual_check', 0)}篇需人工查阅")
             
             # Step 3: 专利检索
             with step_tabs[2]:
