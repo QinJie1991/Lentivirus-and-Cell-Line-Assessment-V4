@@ -4303,9 +4303,10 @@ class GeneInputComponent:
                     match_info = f" (匹配自: {gene_info['matched_name']})"
                 st.success(f"✓ 已选择HPA基因: **{gene_info['symbol']}**{match_info}")
             
-            # 显示HPA详细信息面板
+            # HPA基因详细信息在结果显示页面展示，不在输入界面显示
+            # 仅保存信息到session_state供后续使用
             if st.session_state.get(hpa_info_key):
-                self._render_hpa_gene_info(st.session_state[hpa_info_key])
+                pass  # 信息已保存，在render_results中展示
             
             return gene_symbol
         elif user_input:
