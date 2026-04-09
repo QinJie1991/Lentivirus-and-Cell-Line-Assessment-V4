@@ -2191,15 +2191,25 @@ class HPAGeneAutocompleteService:
             logger.error(f"构建HPA基因索引失败: {e}")
     
     def _add_to_index(self, name: str, gene_symbol: str, ensembl_id: str, name_type: str):
-        """添加名称到搜索索引"""
+        """添加名称到搜索索引 - 支持一个名称对应多个基因（如ERIS对应CISD2和STING1）"""
         norm = self._normalize(name)
-        if norm and norm not in self.search_index:
-            self.search_index[norm] = {
-                'gene_symbol': gene_symbol,
-                'ensembl_id': ensembl_id,
-                'name_type': name_type,
-                'original_name': name
-            }
+        if not norm:
+            return
+        
+        entry = {
+            'gene_symbol': gene_symbol,
+            'ensembl_id': ensembl_id,
+            'name_type': name_type,
+            'original_name': name
+        }
+        
+        if norm not in self.search_index:
+            self.search_index[norm] = [entry]
+        else:
+            # 检查是否已存在相同的基因符号
+            existing_symbols = {e['gene_symbol'].upper() for e in self.search_index[norm]}
+            if gene_symbol.upper() not in existing_symbols:
+                self.search_index[norm].append(entry)
     
     def _normalize(self, name: str) -> str:
         """标准化名称用于搜索"""
@@ -2222,6 +2232,7 @@ class HPAGeneAutocompleteService:
         """
         获取基因建议（输入2个字符以上显示建议）
         匹配逻辑：精确匹配 > 前缀匹配 > 包含匹配 > 模糊匹配
+        修复：正确处理一个同义词对应多个基因的情况（如ERIS -> CISD2, STING1）
         """
         if not query or len(query) < 2:
             return []
@@ -2233,71 +2244,50 @@ class HPAGeneAutocompleteService:
         matches = []
         seen_genes = set()
         
+        # 辅助函数：添加匹配结果
+        def add_matches(entries: list, match_type: str, score: int):
+            """添加匹配条目，处理一个名称对应多个基因的情况"""
+            for entry in entries:
+                gene_symbol = entry['gene_symbol']
+                gene_key = gene_symbol.upper()
+                
+                if gene_key not in seen_genes:
+                    matches.append({
+                        'display_name': gene_symbol,
+                        'gene_symbol': gene_symbol,
+                        'match_type': match_type,
+                        'matched_name': entry['original_name'],
+                        'name_type': entry['name_type'],
+                        'score': score
+                    })
+                    seen_genes.add(gene_key)
+        
         # 1. 精确匹配
         if query_norm in self.search_index:
-            info = self.search_index[query_norm]
-            gene_symbol = info['gene_symbol']
-            if gene_symbol.upper() not in seen_genes:
-                matches.append({
-                    'display_name': gene_symbol,
-                    'gene_symbol': gene_symbol,
-                    'match_type': 'exact',
-                    'matched_name': info['original_name'],
-                    'name_type': info['name_type'],
-                    'score': 100
-                })
-                seen_genes.add(gene_symbol.upper())
+            add_matches(self.search_index[query_norm], 'exact', 100)
         
         # 2. 前缀匹配
-        for norm, info in self.search_index.items():
-            gene_symbol = info['gene_symbol']
-            if gene_symbol.upper() not in seen_genes and norm.startswith(query_norm):
-                matches.append({
-                    'display_name': gene_symbol,
-                    'gene_symbol': gene_symbol,
-                    'match_type': 'prefix',
-                    'matched_name': info['original_name'],
-                    'name_type': info['name_type'],
-                    'score': 80 - len(norm)
-                })
-                seen_genes.add(gene_symbol.upper())
+        for norm, entries in self.search_index.items():
+            if norm.startswith(query_norm):
+                add_matches(entries, 'prefix', 80 - len(norm))
                 if len(seen_genes) >= limit * 2:
                     break
         
         # 3. 包含匹配
-        for norm, info in self.search_index.items():
-            gene_symbol = info['gene_symbol']
-            if gene_symbol.upper() not in seen_genes and query_norm in norm:
-                matches.append({
-                    'display_name': gene_symbol,
-                    'gene_symbol': gene_symbol,
-                    'match_type': 'substring',
-                    'matched_name': info['original_name'],
-                    'name_type': info['name_type'],
-                    'score': 50
-                })
-                seen_genes.add(gene_symbol.upper())
+        for norm, entries in self.search_index.items():
+            if query_norm in norm:
+                add_matches(entries, 'substring', 50)
                 if len(seen_genes) >= limit * 2:
                     break
         
         # 4. 模糊匹配（查询3字符以上）
         if len(query_norm) >= 3:
-            for norm, info in self.search_index.items():
-                gene_symbol = info['gene_symbol']
-                if gene_symbol.upper() not in seen_genes:
-                    sim = difflib.SequenceMatcher(None, query_norm, norm).ratio()
-                    if sim > 0.6:
-                        matches.append({
-                            'display_name': gene_symbol,
-                            'gene_symbol': gene_symbol,
-                            'match_type': 'fuzzy',
-                            'matched_name': info['original_name'],
-                            'name_type': info['name_type'],
-                            'score': int(sim * 40)
-                        })
-                        seen_genes.add(gene_symbol.upper())
-                        if len(seen_genes) >= limit * 2:
-                            break
+            for norm, entries in self.search_index.items():
+                sim = difflib.SequenceMatcher(None, query_norm, norm).ratio()
+                if sim > 0.6:
+                    add_matches(entries, 'fuzzy', int(sim * 40))
+                    if len(seen_genes) >= limit * 2:
+                        break
         
         # 排序并限制数量
         matches.sort(key=lambda x: (x['score'], x['display_name']), reverse=True)
@@ -4530,6 +4520,280 @@ class ReportExporter:
         except Exception as e:
             return f"Error generating CSV: {str(e)}"
 
+# ==================== 四步法序列设计模块（用户定义版）====================
+class FourStepSequenceDesign:
+    """
+    四步法序列设计模块 - 按用户需求实现
+    
+    | 步骤 | 内容 |
+    |------|------|
+    | 步骤1 | 检索文献，找到目的基因敲低/敲除文章（增加物种限定搜索） |
+    | 步骤2 | 提取Methods中的序列，或标记"序列在补充材料" |
+    | 步骤3 | 检索公开专利 |
+    | 步骤4 | 核对物种一致性（标记提醒模式） |
+    """
+    
+    def __init__(self, ncbi_client: NCBIClient):
+        self.ncbi = ncbi_client
+    
+    def execute(self, gene_name: str, experiment_type: str, organism: str) -> Dict:
+        """
+        执行四步法序列设计
+        
+        Args:
+            gene_name: 基因名
+            experiment_type: 'knockdown' 或 'knockout'
+            organism: 物种（如 human, mouse）
+        
+        Returns:
+            四步法结果字典
+        """
+        result = {
+            'gene_name': gene_name,
+            'experiment_type': experiment_type,
+            'organism': organism,
+            'step1_literature_search': {},
+            'step2_extract_sequences': {},
+            'step3_patent_search': {},
+            'step4_species_check': {}
+        }
+        
+        # 步骤1: 检索文献（带物种限定）
+        result['step1_literature_search'] = self._step1_search_literature(
+            gene_name, experiment_type, organism
+        )
+        
+        # 步骤2: 提取Methods中的序列
+        result['step2_extract_sequences'] = self._step2_extract_sequences(
+            gene_name, experiment_type, organism, 
+            result['step1_literature_search'].get('papers', [])
+        )
+        
+        # 步骤3: 检索公开专利
+        result['step3_patent_search'] = self._step3_search_patents(gene_name)
+        
+        # 步骤4: 核对物种一致性
+        result['step4_species_check'] = self._step4_check_species(
+            gene_name, organism, result
+        )
+        
+        return result
+    
+    def _step1_search_literature(self, gene_name: str, experiment_type: str, organism: str) -> Dict:
+        """
+        步骤1: 检索文献，找到目的基因敲低/敲除文章（增加物种限定搜索）
+        """
+        result = {
+            'query': '',
+            'papers': [],
+            'total_found': 0
+        }
+        
+        try:
+            # 构建带物种限定的查询
+            organism_map = {
+                'human': 'Homo sapiens',
+                'mouse': 'Mus musculus',
+                'rat': 'Rattus norvegicus'
+            }
+            organism_name = organism_map.get(organism.lower(), organism)
+            
+            if experiment_type.lower() == 'knockdown':
+                query = f"({gene_name}[Title/Abstract]) AND (shRNA OR siRNA OR knockdown) AND ({organism_name}[Title/Abstract])"
+            else:  # knockout
+                query = f"({gene_name}[Title/Abstract]) AND (CRISPR OR knockout OR sgRNA) AND ({organism_name}[Title/Abstract])"
+            
+            result['query'] = query
+            
+            # 使用NCBI搜索文献
+            search_params = {
+                'db': 'pubmed',
+                'term': query,
+                'retmode': 'json',
+                'retmax': 20,
+                'sort': 'relevance'
+            }
+            
+            search_result = self.ncbi._make_request('esearch.fcgi', search_params)
+            if not search_result:
+                result['error'] = '文献搜索请求失败'
+                return result
+            
+            pmids = search_result.get('esearchresult', {}).get('idlist', [])
+            result['total_found'] = len(pmids)
+            
+            if not pmids:
+                result['message'] = '未找到相关文献'
+                return result
+            
+            # 获取文献详情
+            fetch_params = {
+                'db': 'pubmed',
+                'id': ','.join(pmids[:10]),  # 最多10篇
+                'retmode': 'json'
+            }
+            
+            fetch_result = self.ncbi._make_request('esummary.fcgi', fetch_params)
+            if not fetch_result:
+                result['error'] = '获取文献详情失败'
+                return result
+            
+            docs = fetch_result.get('result', {})
+            papers = []
+            
+            for pmid in pmids[:10]:
+                doc = docs.get(str(pmid), {})
+                if doc:
+                    papers.append({
+                        'pmid': pmid,
+                        'title': doc.get('title', ''),
+                        'authors': [a.get('name', '') for a in doc.get('authors', [])[:3]],
+                        'journal': doc.get('fulljournalname', ''),
+                        'year': doc.get('pubdate', '')[:4] if doc.get('pubdate') else '',
+                        'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                    })
+            
+            result['papers'] = papers
+            
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"步骤1文献搜索失败: {e}")
+        
+        return result
+    
+    def _step2_extract_sequences(self, gene_name: str, experiment_type: str, 
+                                  organism: str, papers: List[Dict]) -> Dict:
+        """
+        步骤2: 提取Methods中的序列，或标记"序列在补充材料"
+        
+        注：这是一个标记系统，实际提取需要全文解析
+        这里标记需要人工查阅的文献
+        """
+        result = {
+            'sequences_found': [],  # 在Methods中找到的序列
+            'in_methods': [],       # 序列在Methods中的文献
+            'in_supplementary': [], # 序列在补充材料的文献
+            'needs_manual_check': [] # 需要人工查阅的文献
+        }
+        
+        try:
+            for paper in papers:
+                # 目前无法自动提取Methods中的序列
+                # 标记这些文献供用户手动查阅
+                result['needs_manual_check'].append({
+                    'pmid': paper.get('pmid'),
+                    'title': paper.get('title'),
+                    'note': '需查阅Methods部分寻找shRNA/sgRNA序列',
+                    'url': paper.get('url')
+                })
+            
+            # 如果有AI客户端，尝试分析文献
+            # 这里只是一个标记框架
+            result['note'] = '自动提取Methods中的序列需要全文访问权限，建议人工查阅上述文献'
+            
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"步骤2序列提取失败: {e}")
+        
+        return result
+    
+    def _step3_search_patents(self, gene_name: str) -> Dict:
+        """
+        步骤3: 检索公开专利
+        """
+        result = {
+            'query': '',
+            'patents': [],
+            'total_found': 0
+        }
+        
+        try:
+            # 使用NCBI的Patent数据库搜索
+            # 注意：NCBI的专利搜索有限，这里使用Google Patents的链接
+            queries = [
+                f"{gene_name} shRNA",
+                f"{gene_name} siRNA",
+                f"{gene_name} CRISPR",
+                f"{gene_name} sgRNA"
+            ]
+            
+            result['query'] = queries
+            
+            # 构建Google Patents搜索链接
+            for query in queries:
+                encoded_query = query.replace(' ', '+')
+                result['patents'].append({
+                    'search_url': f"https://patents.google.com/?q={encoded_query}",
+                    'query': query,
+                    'note': '点击链接查看相关专利'
+                })
+            
+            result['total_found'] = len(queries)
+            result['note'] = '专利检索通过Google Patents进行，请访问上述链接查看详细结果'
+            
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"步骤3专利搜索失败: {e}")
+        
+        return result
+    
+    def _step4_check_species(self, gene_name: str, target_organism: str, 
+                             previous_results: Dict) -> Dict:
+        """
+        步骤4: 核对物种一致性（标记提醒模式）
+        
+        检查找到的文献和专利是否针对目标物种
+        """
+        result = {
+            'target_organism': target_organism,
+            'species_warnings': [],
+            'match_status': 'unknown'
+        }
+        
+        try:
+            # 检查文献的物种一致性
+            papers = previous_results.get('step1_literature_search', {}).get('papers', [])
+            
+            for paper in papers:
+                title_lower = paper.get('title', '').lower()
+                
+                # 简单的物种检测逻辑
+                species_detected = []
+                if 'human' in title_lower or 'patient' in title_lower or 'clinical' in title_lower:
+                    species_detected.append('human')
+                if 'mouse' in title_lower or 'mice' in title_lower or 'musculus' in title_lower:
+                    species_detected.append('mouse')
+                if 'rat' in title_lower or 'rattus' in title_lower:
+                    species_detected.append('rat')
+                
+                # 如果检测到物种但与目标不同，添加警告
+                if species_detected and target_organism.lower() not in species_detected:
+                    result['species_warnings'].append({
+                        'pmid': paper.get('pmid'),
+                        'title': paper.get('title'),
+                        'detected_species': species_detected,
+                        'target_species': target_organism,
+                        'warning': f'⚠️ 文献物种({", ".join(species_detected)})可能与目标物种({target_organism})不一致',
+                        'url': paper.get('url')
+                    })
+            
+            # 设置整体匹配状态
+            if result['species_warnings']:
+                result['match_status'] = 'mismatch_detected'
+            elif papers:
+                result['match_status'] = 'likely_match'
+            else:
+                result['match_status'] = 'no_data'
+            
+            result['summary'] = f"检查了{len(papers)}篇文献，发现{len(result['species_warnings'])}篇可能存在物种不一致"
+            
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"步骤4物种检查失败: {e}")
+        
+        return result
+
+
 # ==================== 主评估引擎（完整版） ====================
 class HybridAssessmentEngine:
     def __init__(self, email: str, ncbi_api_key: Optional[str] = None, ai_api_key: Optional[str] = None):
@@ -4971,6 +5235,7 @@ class HybridAssessmentEngine:
 
         # 序列设计
         if experiment_type.lower() in ['knockdown', 'knockout']:
+            # 原有的序列设计保留
             if experiment_type.lower() == 'knockdown':
                 # shRNA设计仍使用AI
                 if self.ai and self.ai.api_key:
@@ -5025,6 +5290,20 @@ class HybridAssessmentEngine:
                         'source': '检索失败',
                         'status': 'error'
                     }
+            
+            # ===== 四步法序列设计（新增）=====
+            try:
+                with st.spinner("正在执行四步法序列设计..."):
+                    four_step_designer = FourStepSequenceDesign(self.ncbi)
+                    four_step_result = four_step_designer.execute(
+                        gene_name=gene_name,
+                        experiment_type=experiment_type,
+                        organism=organism
+                    )
+                    result['four_step_design'] = four_step_result
+            except Exception as e:
+                logger.error(f"四步法设计失败: {e}")
+                result['four_step_design'] = {'error': str(e)}
 
         # 最终推荐
         try:
@@ -6155,6 +6434,107 @@ def render_results(result: Dict):
                     st.error("序列设计数据格式异常")
         else:
             st.info("敲低和敲除实验可查看序列设计建议（从文献检索已报道的sgRNA）")
+        
+        # ==================== 四步法序列设计（用户定义版）====================
+        st.divider()
+        st.markdown("### 🎯 四步法序列设计")
+        
+        four_step = result.get('four_step_design', {})
+        if four_step and not four_step.get('error'):
+            # 创建四步法的子标签页
+            step_tabs = st.tabs([
+                "① 文献检索",
+                "② 序列提取", 
+                "③ 专利检索",
+                "④ 物种核对"
+            ])
+            
+            # Step 1: 文献检索
+            with step_tabs[0]:
+                st.markdown("#### 步骤1: 检索文献（带物种限定）")
+                step1 = four_step.get('step1_literature_search', {})
+                
+                if step1.get('query'):
+                    st.caption(f"**搜索策略**: `{step1['query']}`")
+                
+                if step1.get('papers'):
+                    st.success(f"**找到 {len(step1['papers'])} 篇相关文献**")
+                    for i, paper in enumerate(step1['papers'], 1):
+                        with st.expander(f"{i}. {paper.get('title', '')[:60]}..."):
+                            st.write(f"**标题**: {paper.get('title', '')}")
+                            st.write(f"**作者**: {', '.join(paper.get('authors', []))}")
+                            st.write(f"**期刊**: {paper.get('journal', '')} ({paper.get('year', '')})")
+                            st.markdown(f"**PubMed**: [{paper.get('pmid', '')}]({paper.get('url', '')})")
+                elif step1.get('total_found') == 0:
+                    st.warning("未找到相关文献")
+                
+                if step1.get('error'):
+                    st.error(f"检索错误: {step1['error']}")
+            
+            # Step 2: 序列提取
+            with step_tabs[1]:
+                st.markdown("#### 步骤2: 提取Methods中的序列")
+                step2 = four_step.get('step2_extract_sequences', {})
+                
+                needs_check = step2.get('needs_manual_check', [])
+                if needs_check:
+                    st.info(f"**需人工查阅Methods的文献 ({len(needs_check)}篇)**")
+                    st.caption("自动提取Methods中的序列需要全文访问权限，请人工查阅以下文献")
+                    
+                    for i, item in enumerate(needs_check, 1):
+                        with st.expander(f"{i}. {item.get('title', '')[:50]}..."):
+                            st.write(f"**标题**: {item.get('title', '')}")
+                            st.markdown(f"**PubMed**: [{item.get('pmid', '')}]({item.get('url', '')})")
+                            st.warning(f"**注意**: {item.get('note', '')}")
+                else:
+                    st.info("无文献需要查阅")
+                
+                if step2.get('note'):
+                    st.caption(f"💡 {step2['note']}")
+            
+            # Step 3: 专利检索
+            with step_tabs[2]:
+                st.markdown("#### 步骤3: 检索公开专利")
+                step3 = four_step.get('step3_patent_search', {})
+                
+                if step3.get('patents'):
+                    st.success(f"**专利检索链接 ({len(step3['patents'])}个)**")
+                    for patent in step3['patents']:
+                        st.markdown(f"- **[{patent.get('query', '')}]({patent.get('search_url', '')})** - {patent.get('note', '')}")
+                
+                if step3.get('note'):
+                    st.info(f"💡 {step3['note']}")
+            
+            # Step 4: 物种核对
+            with step_tabs[3]:
+                st.markdown("#### 步骤4: 核对物种一致性（标记提醒模式）")
+                step4 = four_step.get('step4_species_check', {})
+                
+                st.write(f"**目标物种**: {step4.get('target_organism', 'N/A')}")
+                
+                warnings = step4.get('species_warnings', [])
+                if warnings:
+                    st.error(f"**⚠️ 发现 {len(warnings)} 篇文献可能存在物种不一致**")
+                    for warning in warnings:
+                        with st.expander(f"⚠️ {warning.get('title', '')[:50]}..."):
+                            st.write(f"**标题**: {warning.get('title', '')}")
+                            st.write(f"**检测到的物种**: {', '.join(warning.get('detected_species', []))}")
+                            st.write(f"**目标物种**: {warning.get('target_species', '')}")
+                            st.warning(warning.get('warning', ''))
+                            st.markdown(f"**PubMed**: [查看文献]({warning.get('url', '')})")
+                else:
+                    match_status = step4.get('match_status', 'unknown')
+                    if match_status == 'likely_match':
+                        st.success("✅ 未发现明显的物种不一致问题")
+                    elif match_status == 'no_data':
+                        st.info("ℹ️ 无足够数据核对物种")
+                
+                if step4.get('summary'):
+                    st.caption(step4['summary'])
+        else:
+            st.warning("四步法设计数据不可用")
+            if four_step.get('error'):
+                st.error(f"错误: {four_step['error']}")
 
     # ==================== 转录本选择 ====================
     with tabs[5]:
