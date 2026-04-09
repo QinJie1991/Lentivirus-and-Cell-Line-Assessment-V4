@@ -4188,11 +4188,22 @@ class GeneInputComponent:
                 logger.error(f"HPA数据下载失败: {e}")
                 st.error(f"数据下载失败: {e}")
 
+        # 使用session_state绑定输入框值，确保选中后能正确更新显示
+        input_widget_key = f"{key_prefix}_text_widget"
+        
+        # 确保session_state中的值与widget同步
+        # 如果已选中基因，强制更新widget的值为选中的基因名
+        if st.session_state.get(selected_key) and st.session_state.get(input_key):
+            # 确保widget值与session_state一致
+            if input_widget_key in st.session_state:
+                if st.session_state[input_widget_key] != st.session_state[input_key]:
+                    st.session_state[input_widget_key] = st.session_state[input_key]
+        
         user_input = st.text_input(
             input_label,
             value=st.session_state[input_key],
             placeholder="例如：TP53, EGFR, GAPDH...",
-            key=f"{key_prefix}_text_widget",
+            key=input_widget_key,
             disabled=disabled
         )
 
@@ -4235,7 +4246,9 @@ class GeneInputComponent:
                 safe_rerun()
 
         suggestions = st.session_state.get(suggestions_key, [])
-        if suggestions and not st.session_state[selected_key]:
+        selected_symbol = st.session_state.get(selected_key, '')
+        
+        if suggestions:
             st.caption(f"💡 HPA基因匹配 ({len(suggestions)}个建议)：")
             cols = st.columns(min(len(suggestions), 4))
             for i, gene in enumerate(suggestions):
@@ -4249,11 +4262,18 @@ class GeneInputComponent:
                     if name_type == 'synonym' and matched_name and matched_name.upper() != gene['symbol'].upper():
                         display_text = f"{gene['symbol']} (via {matched_name})"
                     
-                    # 最高分（第一个）用primary，其他用secondary，但不加勾选符号
-                    # 勾选符号只在用户点击后显示
-                    is_highest_score = i == 0 and len(suggestions) > 0
-                    btn_type = "primary" if is_highest_score else "secondary"
-                    help_text = f"匹配: {matched_name} ({match_type})" if matched_name else f"匹配类型: {match_type}"
+                    # 检查是否已选中
+                    is_selected = selected_symbol == gene['symbol']
+                    
+                    # 选中状态显示勾选符号，最高分用primary强调
+                    if is_selected:
+                        display_text = f"✓ {display_text}"
+                        btn_type = "primary"
+                        help_text = "已选中"
+                    else:
+                        is_highest_score = i == 0 and len(suggestions) > 0
+                        btn_type = "primary" if is_highest_score else "secondary"
+                        help_text = f"匹配: {matched_name} ({match_type})" if matched_name else f"匹配类型: {match_type}"
                     
                     if st.button(display_text, key=f"{key_prefix}_sug_{i}", use_container_width=True, type=btn_type, help=help_text):
                         st.session_state[selected_key] = gene['symbol']
@@ -4267,15 +4287,15 @@ class GeneInputComponent:
                         
                         safe_rerun()
 
-        if st.session_state[selected_key]:
-            gene_symbol = st.session_state[selected_key]
+        if selected_symbol:
+            gene_symbol = selected_symbol
             
             # 如果还没有HPA详情，获取它
             if self.hpa_detail_service and not st.session_state.get(hpa_info_key):
                 hpa_details = self.hpa_detail_service.get_gene_details(gene_symbol)
                 st.session_state[hpa_info_key] = hpa_details
             
-            # 显示选择信息 - 这里显示勾选符号
+            # 显示选择确认信息
             if f"{key_prefix}_info" in st.session_state:
                 gene_info = st.session_state[f"{key_prefix}_info"]
                 match_info = ""
@@ -5691,9 +5711,13 @@ def render_main_panel():
 
         cell_line_value = None
         cell_metadata = None
+        
+        # 获取当前选中状态和输入
+        cell_input = st.session_state.get('cell_line_input', '')
+        selected_cell = st.session_state.get('cell_line_selected', None)
 
-        # 显示自动补全建议（调试功能已移除）
-        if cell_input and len(cell_input) >= 1 and not st.session_state.get('cell_line_selected'):
+        # 显示自动补全建议（始终显示，即使已选中）
+        if cell_input and len(cell_input) >= 1:
             suggestions = cell_service.get_suggestions(cell_input, limit=8)
 
             if suggestions:
@@ -5702,11 +5726,20 @@ def render_main_panel():
 
                 for i, sug in enumerate(suggestions):
                     with cols[i % 4]:
-                        # 最高分（第一个）用primary强调，但不加勾选符号
-                        is_highest_score = i == 0 and len(suggestions) > 0
-                        label = sug['display_name']
-                        btn_type = "primary" if is_highest_score else "secondary"
-                        help_text = f"匹配类型: {sug['match_type']}, 分数: {sug['score']}"
+                        # 检查是否已选中
+                        is_selected = selected_cell == sug['hpa_name']
+                        
+                        # 选中状态显示勾选符号
+                        if is_selected:
+                            label = f"✓ {sug['display_name']}"
+                            btn_type = "primary"
+                            help_text = "已选中"
+                        else:
+                            # 最高分（第一个）用primary强调
+                            is_highest_score = i == 0 and len(suggestions) > 0
+                            label = sug['display_name']
+                            btn_type = "primary" if is_highest_score else "secondary"
+                            help_text = f"匹配类型: {sug['match_type']}, 分数: {sug['score']}"
 
                         if st.button(label, key=f"cell_sug_{i}", use_container_width=True,
                                    type=btn_type, help=help_text):
@@ -5729,48 +5762,49 @@ def render_main_panel():
                 st.caption(f"💡 未找到匹配的HPA细胞系 (输入: '{cell_input}')")
                 st.info("提示：可继续输入或点击「开始评估」使用自定义名称")
 
-            # 检查是否有精确匹配但名称不同
-            exact_match = cell_service.get_exact_match(cell_input)
-            if exact_match and exact_match.upper() != cell_input.upper():
-                st.info(f"💡 检测到HPA标准名称: **{exact_match}** (与您输入的 '{cell_input}' 略有不同)")
-                col_yes, col_no = st.columns([1.5, 2])
-                with col_yes:
-                    if st.button(f"✓ 使用 {exact_match}", key="use_hpa_exact", type="primary"):
-                        st.session_state['cell_line_selected'] = exact_match
-                        st.session_state['cell_line_input'] = exact_match
-                        st.session_state['cell_line_validation'] = {
-                            'input': cell_input,
-                            'normalized': cell_service._normalize(exact_match),
-                            'is_valid': True,
-                            'hpa_standard_name': exact_match,
-                            'suggested_standard': exact_match,
-                            'confidence': 0.95,
-                            'match_type': 'exact',
-                            'needs_confirmation': False
-                        }
-                        safe_rerun()
-                with col_no:
-                    if st.button("保持原输入", key="keep_original"):
-                        st.session_state['cell_line_selected'] = cell_input
-                        st.session_state['cell_line_validation'] = {
-                            'input': cell_input,
-                            'normalized': cell_service._normalize(cell_input),
-                            'is_valid': False,
-                            'hpa_standard_name': None,
-                            'suggested_standard': cell_input,
-                            'confidence': 0.5,
-                            'match_type': 'none',
-                            'needs_confirmation': True,
-                            'warning': f"'{cell_input}' 不是标准HPA细胞系名称"
-                        }
-                        safe_rerun()
+            # 检查是否有精确匹配但名称不同（仅在未选中时显示）
+            if not selected_cell:
+                exact_match = cell_service.get_exact_match(cell_input)
+                if exact_match and exact_match.upper() != cell_input.upper():
+                    st.info(f"💡 检测到HPA标准名称: **{exact_match}** (与您输入的 '{cell_input}' 略有不同)")
+                    col_yes, col_no = st.columns([1.5, 2])
+                    with col_yes:
+                        if st.button(f"✓ 使用 {exact_match}", key="use_hpa_exact", type="primary"):
+                            st.session_state['cell_line_selected'] = exact_match
+                            st.session_state['cell_line_input'] = exact_match
+                            st.session_state['cell_line_validation'] = {
+                                'input': cell_input,
+                                'normalized': cell_service._normalize(exact_match),
+                                'is_valid': True,
+                                'hpa_standard_name': exact_match,
+                                'suggested_standard': exact_match,
+                                'confidence': 0.95,
+                                'match_type': 'exact',
+                                'needs_confirmation': False
+                            }
+                            safe_rerun()
+                    with col_no:
+                        if st.button("保持原输入", key="keep_original"):
+                            st.session_state['cell_line_selected'] = cell_input
+                            st.session_state['cell_line_validation'] = {
+                                'input': cell_input,
+                                'normalized': cell_service._normalize(cell_input),
+                                'is_valid': False,
+                                'hpa_standard_name': None,
+                                'suggested_standard': cell_input,
+                                'confidence': 0.5,
+                                'match_type': 'none',
+                                'needs_confirmation': True,
+                                'warning': f"'{cell_input}' 不是标准HPA细胞系名称"
+                            }
+                            safe_rerun()
 
-            cell_line_value = cell_input
+            cell_line_value = selected_cell if selected_cell else cell_input
             cell_metadata = st.session_state.get('cell_line_validation', {})
 
         # 显示已选择状态
-        if st.session_state.get('cell_line_selected'):
-            cell_line_value = st.session_state['cell_line_selected']
+        if selected_cell:
+            cell_line_value = selected_cell
             st.success(f"✓ 已选择HPA标准细胞系: **{cell_line_value}**")
 
             # 显示细胞类型提示
