@@ -61,6 +61,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ==================== AI模型配置 ====================
+AVAILABLE_AI_MODELS = {
+    'qwen-turbo': '通义千问-Turbo (快速响应)',
+    'qwen-plus': '通义千问-Plus (推荐，更好的推理能力)',
+    'qwen-max': '通义千问-Max (最强性能)'
+}
+DEFAULT_AI_MODEL = 'qwen-plus'
+# ================================================
+
 # ==================== HPA细胞系自动补全服务（新增）====================
 class HPACellLineAutocompleteService:
     """HPA数据库细胞系名称自动补全服务 - 包含1206个细胞系的标准名称"""
@@ -534,8 +543,11 @@ class AIAnalysisClient:
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
+            # 获取当前选择的AI模型（从session_state或默认值）
+            current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
+            
             payload = {
-                'model': 'qwen-turbo',
+                'model': current_model,
                 'input': {
                     'messages': [
                         {'role': 'system', 'content': '你是一个严谨的生物医学文献分析助手。你只基于提供的文献内容进行判断，绝不进行推测或引申。'},
@@ -742,8 +754,11 @@ class AIAnalysisClient:
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
+            # 获取当前选择的AI模型（从session_state或默认值）
+            current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
+            
             payload = {
-                'model': 'qwen-turbo',
+                'model': current_model,
                 'input': {
                     'messages': [
                         {'role': 'system', 'content': '你是分子生物学专家，精通基因功能注释和表型分析。你只能基于用户提供的文献进行总结，绝对禁止编造任何文献、PMID、作者或期刊信息。reference字段必须严格使用格式："第一作者 et al., 年份, 期刊缩写, PMID:数字"。如果信息不确定，明确标注"未见报道"。'},
@@ -1741,8 +1756,11 @@ class AIAnalysisClient:
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
+            # 获取当前选择的AI模型（从session_state或默认值）
+            current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
+            
             payload = {
-                'model': 'qwen-turbo',
+                'model': current_model,
                 'input': {
                     'messages': [
                         {'role': 'system', 'content': '你是细胞培养技术专家，熟悉各种细胞系的培养难点和protocol，包括HK-2（人肾小管上皮细胞）、NCI-H226（肺鳞癌细胞）等常见细胞系的特殊要求。'},
@@ -1866,8 +1884,11 @@ class AIAnalysisClient:
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
+            # 获取当前选择的AI模型（从session_state或默认值）
+            current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
+            
             payload = {
-                'model': 'qwen-turbo',
+                'model': current_model,
                 'input': {
                     'messages': [
                         {'role': 'system', 'content': '你是病毒学专家，精通慢病毒载体和细胞转导，熟悉各种细胞系的慢病毒感染特性。'},
@@ -5589,8 +5610,9 @@ def render_sidebar():
                     try:
                         ai_test = QwenAnalyzer(api_key=final_qwen)
                         # 尝试一个简单的API调用
+                        current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
                         test_response = ai_test._make_request({
-                            'model': 'qwen-turbo',
+                            'model': current_model,
                             'input': {
                                 'messages': [
                                     {'role': 'user', 'content': 'Hello'}
@@ -5632,7 +5654,7 @@ def render_main_panel():
     if is_locked:
         st.warning("🔒 当前评估已锁定。如需进行新评估，请点击下方的「开始新评估」按钮。")
 
-    # ===== 第一行：物种 + 转录本号 =====
+    # ===== 第一行：物种 + AI模型选择 =====
     row1_col1, row1_col2 = st.columns(2)
     
     with row1_col1:
@@ -5651,6 +5673,28 @@ def render_main_panel():
         )
     
     with row1_col2:
+        # AI模型选择
+        if 'selected_ai_model' not in st.session_state:
+            st.session_state['selected_ai_model'] = DEFAULT_AI_MODEL
+        
+        selected_model = st.selectbox(
+            "AI模型",
+            list(AVAILABLE_AI_MODELS.keys()),
+            format_func=lambda x: AVAILABLE_AI_MODELS.get(x, x),
+            index=list(AVAILABLE_AI_MODELS.keys()).index(st.session_state['selected_ai_model']),
+            help="选择用于分析的AI模型。qwen-plus推荐用于生物医学分析",
+            disabled=is_locked,
+            key="ai_model_selector"
+        )
+        
+        if selected_model != st.session_state['selected_ai_model']:
+            st.session_state['selected_ai_model'] = selected_model
+            st.toast(f"已切换到: {AVAILABLE_AI_MODELS[selected_model]}", icon="🤖")
+
+    # ===== 第二行：转录本号 + （可选其他） =====
+    row2_col1, row2_col2 = st.columns(2)
+    
+    with row2_col1:
         # 转录本号输入（可选）
         transcript_id = st.text_input(
             "转录本号（可选）",
@@ -5662,6 +5706,10 @@ def render_main_panel():
         )
         if transcript_id != st.session_state.get('transcript_id_input', ''):
             st.session_state['transcript_id_input'] = transcript_id
+    
+    with row2_col2:
+        # 预留位置，可以添加其他参数
+        st.empty()
 
     # ===== HPA服务初始化（在基因输入之前） =====
     if 'hpa_gene_service' not in st.session_state:
@@ -5682,10 +5730,10 @@ def render_main_panel():
     hpa_detail_service = st.session_state.get('hpa_gene_detail_service')
     gene_service = GeneAutocompleteService()
 
-    # ===== 第二行：细胞系 + 基因名 =====
-    row2_col1, row2_col2 = st.columns(2)
+    # ===== 第三行：细胞系 + 基因名 =====
+    row3_col1, row3_col2 = st.columns(2)
     
-    with row2_col1:
+    with row3_col1:
         # ===== HPA细胞系自动补全输入 =====
         # ===== HPA细胞系自动补全输入（新增功能）=====
         if 'cell_line_component' not in st.session_state:
@@ -5822,7 +5870,7 @@ def render_main_panel():
                 'hpa_standard_name': cell_line_value if cell_service.is_valid_cell_line(cell_line_value) else None
             }
 
-    with row2_col2:
+    with row3_col2:
         # ===== 基因名输入（HPA自动补全）=====
         gene_component = GeneInputComponent(hpa_gene_service, hpa_detail_service)
         gene = gene_component.render(organism, key_prefix="main_gene", disabled=is_locked)
